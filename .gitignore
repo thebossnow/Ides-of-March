@@ -1,0 +1,11 @@
+.env
+*.log
+trade_log.csv
+scan_log.csv
+__pycache__/
+*.pyc
+venv/
+*.db
+*.db-journal
+*.tmp
+VPS files/

@@ -1,0 +1,13 @@
+py-clob-client>=0.21.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+web3==7.12.1
+schedule>=1.2.0
+python-dateutil>=2.8.2
+numpy
+scipy
+pandas
+python-telegram-bot>=21.0
+py-builder-relayer-client>=0.0.1
+eth-abi>=5.0.0
+pytz>=2024.1
