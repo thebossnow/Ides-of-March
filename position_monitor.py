@@ -28,7 +28,7 @@ from positions import (
 )
 from observed_temps import get_current_day_max
 from executor import place_sell_order, DRY_RUN
-from markets import get_midpoint_price, get_market_price, get_client as get_clob_client
+from markets import get_midpoint_price, get_market_price, get_client as get_clob_client, get_bid_price
 from strategy import forecast_probability, convert_forecast_to_market_unit
 from weather import get_forecast
 
@@ -133,24 +133,28 @@ def _check_same_day_exit(pos: dict, clob_client=None) -> Optional[dict]:
     # Check if current max has blown past our bucket
     exit_reason = None
 
+    # Case 1: temp already exceeded bucket ceiling (applies to range buckets
+    # AND open-ended "X or lower" buckets where bucket_high is set).
+    # The daily max never decreases, so exceeding bucket_high means certain loss.
     if bucket_high is not None and current_max >= bucket_high + TEMP_EXIT_MARGIN_DEG:
         exit_reason = (
-            f"same_day_exit: observed max {current_max:.1f}{unit} >= "
-            f"bucket_high {bucket_high}{unit} + {TEMP_EXIT_MARGIN_DEG} margin"
+            f"same_day_exit: observed max {current_max:.1f}{unit} already "
+            f"{current_max - bucket_high:.1f} above bucket ceiling {bucket_high}{unit}"
         )
 
-    if bucket_low is not None and bucket_high is not None:
-        # For range buckets: if current max is already well above the range
-        # high, the final max will almost certainly be above our bucket
-        if current_max >= bucket_high + TEMP_EXIT_MARGIN_DEG:
+    # Case 2: open-ended HIGH market ("X or higher", bucket_low=X, bucket_high=None).
+    # If it's late in the day and the max is still well below the floor,
+    # the position is a near-certain loser — cut it.
+    if exit_reason is None and bucket_low is not None and bucket_high is None:
+        from weather import CITIES as _CITIES_PM
+        city_tz = _CITIES_PM.get(city, {}).get("tz")
+        hours_left = get_hours_to_resolution(market_date, city_tz)
+        if hours_left < 6.0 and current_max < bucket_low - TEMP_EXIT_MARGIN_DEG:
             exit_reason = (
-                f"same_day_exit: observed max {current_max:.1f}{unit} already "
-                f"{current_max - bucket_high:.1f} above bucket ceiling {bucket_high}{unit}"
+                f"same_day_exit: observed max {current_max:.1f}{unit} is "
+                f"{bucket_low - current_max:.1f} below floor {bucket_low}{unit} "
+                f"with only {hours_left:.1f}h remaining"
             )
-
-    # Note: we don't exit on "current max below bucket_low" because the
-    # temp could still rise later in the day. Only exit when temp has
-    # exceeded our bucket's HIGH side (can't go back down).
 
     if exit_reason is None:
         return None
@@ -179,8 +183,9 @@ def _check_profit_take(pos: dict, clob_client=None) -> Optional[dict]:
     token_id = pos["token_id"]
     entry_price = pos["entry_price"]
 
-    # Get current market price
-    current_price = get_midpoint_price(token_id, client=clob_client)
+    # Use bid price for profit calculation: this is what a FOK sell will
+    # actually receive. Using midpoint would overstate realizable profit.
+    current_price = get_bid_price(token_id, client=clob_client)
     if current_price is None:
         current_price = get_market_price(token_id, client=clob_client)
     if current_price is None:
@@ -287,21 +292,20 @@ def monitor_positions(notifier=None) -> dict:
 
         exits_triggered += 1
 
-        # Determine sell price
-        if "current_price" in exit_action:
-            # Profit-taking: sell at current market price
-            sell_price = exit_action["current_price"]
-        else:
-            # Same-day exit: sell at best available price (use midpoint or lower)
-            sell_price = get_midpoint_price(exit_action["token_id"], client=clob_client)
-            if sell_price is None:
-                sell_price = get_market_price(exit_action["token_id"], client=clob_client)
-            if sell_price is None:
-                logger.warning(
-                    f"Cannot determine sell price for position {pos['id']}, skipping exit"
-                )
-                errors += 1
-                continue
+        # Determine sell price.
+        # FOK sell orders must be placed at or below the best bid to guarantee a fill.
+        # Using midpoint would place the limit above the best buyer's price, causing
+        # the FOK to be killed instantly (no one buys above bid).
+        sell_price = get_bid_price(exit_action["token_id"], client=clob_client)
+        if sell_price is None:
+            # Fallback: last trade price (acceptable for non-zero liquidity)
+            sell_price = get_market_price(exit_action["token_id"], client=clob_client)
+        if sell_price is None:
+            logger.warning(
+                f"Cannot determine sell price for position {pos['id']}, skipping exit"
+            )
+            errors += 1
+            continue
 
         # Place the sell order
         resp = place_sell_order(
@@ -312,6 +316,8 @@ def monitor_positions(notifier=None) -> dict:
 
         order_status = resp.get("status", "FAILED")
         order_id = resp.get("orderID", "N/A")
+        # Use actual_shares from response (may differ if balance was adjusted)
+        actual_shares_sold = resp.get("actual_shares", exit_action["shares"])
 
         if order_status in ("simulated", "MATCHED", "LIVE"):
             record_exit(
@@ -319,6 +325,7 @@ def monitor_positions(notifier=None) -> dict:
                 exit_price=sell_price,
                 exit_reason=exit_action["reason"],
                 exit_order_id=order_id,
+                actual_shares=actual_shares_sold,
             )
             exits_executed += 1
 
@@ -330,7 +337,7 @@ def monitor_positions(notifier=None) -> dict:
                     f"<b>Position Exit</b>\n"
                     f"Market: {pos['city']} {pos['market_date']}\n"
                     f"Reason: {exit_action['reason'][:100]}\n"
-                    f"Sell: {exit_action['shares']:.1f} shares @ {sell_price:.3f}\n"
+                    f"Sell: {actual_shares_sold:.1f} shares @ {sell_price:.3f}\n"
                     f"P&L: ${pnl:+.2f}\n"
                     f"Order: {order_status} ({order_id})"
                 )

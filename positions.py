@@ -184,10 +184,15 @@ def record_exit(
     exit_price: float,
     exit_reason: str,
     exit_order_id: str = None,
+    actual_shares: float = None,
 ) -> None:
     """
     Records a position exit (sold before resolution).
     Calculates P&L from entry vs exit price.
+
+    actual_shares: if provided, use this instead of the DB-recorded shares
+    (needed when the executor sold fewer shares than recorded, e.g. due to
+    insufficient balance at sell time).
     """
     conn = _get_conn()
     row = conn.execute(
@@ -199,8 +204,9 @@ def record_exit(
         logger.warning(f"Cannot record exit: position {position_id} not found")
         return
 
-    # P&L: (exit_price - entry_price) * shares
-    pnl = (exit_price - row["entry_price"]) * row["shares"]
+    shares_sold = actual_shares if actual_shares is not None else row["shares"]
+    # P&L: (exit_price - entry_price) * shares_sold
+    pnl = (exit_price - row["entry_price"]) * shares_sold
 
     conn.execute(
         """

@@ -448,6 +448,25 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
         return None
 
 
+def get_bid_price(token_id: str, client: ClobClient = None) -> float | None:
+    """
+    Returns the best bid price from the order book.
+    Used for sell orders — a FOK sell must be placed at or below the best bid
+    to guarantee a fill. Returns None if no bids exist.
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        bids = book.bids or []
+        if bids:
+            return float(bids[0].price)
+        return None
+    except Exception as e:
+        logger.warning(f"Could not fetch bid price for {token_id}: {e}")
+        return None
+
+
 def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
     """
     Returns True if the order book is illiquid (spread > ILLIQUID_SPREAD,

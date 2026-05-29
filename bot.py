@@ -58,7 +58,9 @@ from position_monitor import (
     monitor_positions,
     resolve_past_positions,
     needs_fast_monitoring,
+    get_hours_to_resolution as _get_hours_to_res,
 )
+from weather import CITIES as _CITIES_REF
 from redeemer import redeem_all_winners
 
 # -----------------------------------------------------------------------
@@ -71,8 +73,10 @@ FORECAST_DAYS       = 6    # Max days ahead to fetch forecasts (calibrated sigma
 LOG_LEVEL           = logging.INFO
 
 # Telegram Configuration
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "8575236545:AAFX4M8Gyw6l3p9l6fv8Co1PZpeybmEUkvY")
-TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "6816113987"))
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
+if not TELEGRAM_TOKEN:
+    raise EnvironmentError("TELEGRAM_TOKEN must be set in .env (no default allowed)")
 
 # Daily report time (UTC hour, 0-23). Default: 23:55 UTC
 DAILY_REPORT_HOUR   = 23
@@ -183,12 +187,26 @@ def get_current_bankroll() -> float:
                 print(f"sig_type={sig_type} failed: {inner_e}")
                 continue
 
-        print("⚠️ All balance attempts failed — using fallback $200")
-        return 200.0
+        fallback = float(os.getenv("FALLBACK_BANKROLL", "200.0"))
+        msg = f"All balance attempts failed — using fallback ${fallback:.2f}"
+        print(f"⚠️ {msg}")
+        logger.warning(msg)
+        try:
+            notifier.notify_error("Bankroll", msg)
+        except Exception:
+            pass
+        return fallback
 
     except Exception as e:
-        print(f"❌ get_current_bankroll error: {e}")
-        return 200.0
+        fallback = float(os.getenv("FALLBACK_BANKROLL", "200.0"))
+        msg = f"get_current_bankroll error: {e} — using fallback ${fallback:.2f}"
+        print(f"❌ {msg}")
+        logger.error(msg)
+        try:
+            notifier.notify_error("Bankroll", msg)
+        except Exception:
+            pass
+        return fallback
 
 # -----------------------------------------------------------------------
 # Heartbeat thread (LIVE mode only)
@@ -298,6 +316,27 @@ MIN_PRICE_FLOOR = 0.005
 _traded_tokens: set = set()
 _traded_tokens_date: str = ""
 
+# Daily spend tracking — persists across cycles within a UTC day.
+# Prevents the 20% cap from resetting every 30-minute cycle.
+_daily_spent: float = 0.0
+_daily_spent_date: str = ""
+
+
+def _get_remaining_daily_budget(cycle_bankroll: float) -> float:
+    """Returns remaining USDC budget for today, accounting for all prior cycles."""
+    global _daily_spent, _daily_spent_date
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _daily_spent_date != today:
+        _daily_spent = 0.0
+        _daily_spent_date = today
+    max_daily = cycle_bankroll * 0.2
+    return max(0.0, max_daily - _daily_spent)
+
+
+def _record_daily_spend(amount: float) -> None:
+    global _daily_spent
+    _daily_spent += amount
+
 
 def _reset_position_tracker() -> None:
     """Clears the traded token set at midnight and resets daily Telegram stats."""
@@ -343,7 +382,10 @@ def run_cycle() -> None:
     trades_placed = 0
     total_spent = 0.0
     cycle_bankroll = get_current_bankroll()
-    MAX_DAILY_SPEND = cycle_bankroll * 0.2
+    remaining_budget = _get_remaining_daily_budget(cycle_bankroll)
+    if remaining_budget <= 0:
+        logger.info("Daily spend limit already reached, skipping cycle.")
+        return
 
     try:
         markets = get_weather_markets()
@@ -378,6 +420,17 @@ def run_cycle() -> None:
         if not yes_token_id:
             logger.debug(f"No YES token ID for {slug}")
             log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP", "no_yes_token_id")
+            continue
+
+        # Skip markets too close to resolution (no time to exit a losing trade)
+        _city_tz = _CITIES_REF.get(city, {}).get("tz")
+        hours_left = _get_hours_to_res(date_str, _city_tz)
+        if hours_left < MIN_HOURS_TO_RES:
+            logger.info(
+                f"SKIP (too close to resolution): {slug} | {hours_left:.1f}h remaining"
+            )
+            log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP",
+                     f"resolves_in_{hours_left:.1f}h_<_{MIN_HOURS_TO_RES}h")
             continue
 
         # Check both in-memory set (this cycle) and SQLite (persistent)
@@ -553,10 +606,12 @@ def run_cycle() -> None:
 
     # Phase 3: Execute orders
     for sig in filtered:
-        if total_spent + sig["size"] > MAX_DAILY_SPEND:
+        # Use remaining_budget (persists across cycles) not a per-cycle counter
+        remaining_budget = _get_remaining_daily_budget(cycle_bankroll)
+        if sig["size"] > remaining_budget:
             logger.warning(
-                f"Daily spend limit reached (${total_spent:.2f} + ${sig['size']:.2f} "
-                f"> ${MAX_DAILY_SPEND:.2f}). Stopping."
+                f"Daily spend limit reached (remaining ${remaining_budget:.2f} < "
+                f"${sig['size']:.2f}). Stopping."
             )
             log_scan(sig["slug"], sig["city"], sig["date_str"], sig["prob"],
                      sig["market_price"], sig["edge"], "SKIP", "daily_spend_limit")
@@ -668,9 +723,32 @@ def run_cycle() -> None:
 
             trades_placed += 1
             total_spent += actual_spent
+            _record_daily_spend(actual_spent)
             continue
 
         # ---- Normal (liquid) market path ----
+        # Refresh price immediately before placing the order. The signal price
+        # was fetched during market scanning (potentially minutes ago for large
+        # cycles). If the market moved enough to erase the edge, skip.
+        fresh_price = get_midpoint_price(sig["yes_token_id"], client=clob_client)
+        if fresh_price is None:
+            fresh_price = get_market_price(sig["yes_token_id"], client=clob_client)
+        if fresh_price is not None and abs(fresh_price - sig["market_price"]) > 0.03:
+            fresh_edge = find_edge(sig["prob"], fresh_price)
+            if not should_trade(fresh_edge, forecast_prob=sig["prob"], market_date=sig["date_str"]):
+                logger.info(
+                    f"SKIP (price moved): {sig['slug']} | "
+                    f"signal={sig['market_price']:.3f} -> now={fresh_price:.3f} | "
+                    f"fresh_edge={fresh_edge:+.1%} below threshold"
+                )
+                log_scan(sig["slug"], sig["city"], sig["date_str"], sig["prob"],
+                         fresh_price, fresh_edge, "SKIP", "price_moved_pre_order")
+                continue
+            # Update to fresh price for order placement
+            sig = dict(sig)
+            sig["market_price"] = fresh_price
+            sig["edge"] = fresh_edge
+
         logger.info(
             f"EDGE FOUND: {sig['slug']} | edge={sig['edge']:.1%} | "
             f"size=${sig['size']:.2f} | price={sig['market_price']:.3f}"
@@ -706,9 +784,19 @@ def run_cycle() -> None:
 
         _traded_tokens.add(sig["yes_token_id"])
 
-        # Record position in SQLite for monitoring/resolution/redemption
+        # Record position in SQLite for monitoring/resolution/redemption.
+        # Only "MATCHED" (filled FOK) or "simulated" (dry-run) are accepted.
+        # "LIVE" means the order is resting unfilled — a true FOK cannot be LIVE.
         order_status = order_response.get("status", "UNKNOWN") if order_response else "FAILED"
-        if order_status in ("simulated", "MATCHED", "LIVE"):
+        order_filled = order_status in ("simulated", "MATCHED")
+        if order_status == "LIVE":
+            logger.warning(
+                f"FOK order returned LIVE (resting, not filled) for {sig['slug']} — "
+                f"cancelling and skipping position record. id={order_response.get('orderID')}"
+            )
+            from executor import cancel_order
+            cancel_order(order_response.get("orderID", ""))
+        elif order_filled:
             try:
                 num_shares = sig["size"] / sig["market_price"] if sig["market_price"] > 0 else 0
                 record_entry(
@@ -734,7 +822,7 @@ def run_cycle() -> None:
                 logger.error(f"Failed to record position in DB: {e}")
 
         # Record trade in notifier and send alert
-        notifier.record_trade(entered=True, size_usdc=sig["size"])
+        notifier.record_trade(entered=order_filled, size_usdc=sig["size"] if order_filled else 0.0)
         notifier.notify_trade(
             slug=sig["slug"],
             city=sig["city"],
@@ -746,8 +834,10 @@ def run_cycle() -> None:
             order_status=order_status,
         )
 
-        trades_placed += 1
-        total_spent += sig["size"]
+        if order_filled:
+            trades_placed += 1
+            total_spent += sig["size"]
+            _record_daily_spend(sig["size"])
 
     elapsed = (datetime.now() - cycle_start).total_seconds()
     logger.info(
