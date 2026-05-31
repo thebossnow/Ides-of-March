@@ -27,9 +27,9 @@ CHAIN_ID  = 137  # Polygon Mainnet
 SIG_TYPE  = int(os.getenv("POLYMARKET_SIG_TYPE", "2"))
 
 # -----------------------------------------------------------------------
-# SAFETY FLAG - Change to False ONLY when ready for live trading
+# SAFETY FLAG
 # -----------------------------------------------------------------------
-DRY_RUN = True
+DRY_RUN = False
 
 
 # ---------------------------------------------------------------------------
