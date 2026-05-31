@@ -63,12 +63,14 @@ CITIES = {
     "Wellington":    {"lat": -41.2866, "lon": 174.7756,  "tz": "Pacific/Auckland"},
 }
 
-# Primary and fallback endpoints. The secondary uses a different CDN edge,
-# which can work around transient SSL/rate-limit blocks on specific IPs.
+# Primary and fallback forecast endpoints.
 OPEN_METEO_URLS = [
     "https://api.open-meteo.com/v1/forecast",
     "https://ensemble-api.open-meteo.com/v1/forecast",
 ]
+
+# Ensemble API endpoint — provides per-member temperature forecasts for spread estimation
+ENSEMBLE_API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
 # Retry config
 MAX_RETRIES    = 3
@@ -150,6 +152,85 @@ def get_forecast_fahrenheit(city_name: str, days: int = 3) -> dict:
     """Same as get_forecast but returns temperatures in Fahrenheit."""
     celsius_data = get_forecast(city_name, days)
     return {date: (temp * 9 / 5) + 32 for date, temp in celsius_data.items()}
+
+
+def get_ensemble_spread(city_name: str, target_date: str) -> float | None:
+    """
+    Fetches GFS ensemble member daily max temperatures for a city/date and
+    returns the inter-member standard deviation (in Celsius) as a
+    physically-grounded sigma for that specific forecast.
+
+    This is more accurate than the static SIGMA_BY_HORIZON_F table because
+    it reflects actual model spread — low spread means high confidence that
+    day; high spread means increased uncertainty.
+
+    Returns sigma in Celsius, or None on API failure (caller falls back to
+    the static horizon table).  Convert to Fahrenheit with × 1.8.
+    """
+    if city_name not in CITIES:
+        return None
+
+    city = CITIES[city_name]
+
+    try:
+        today = datetime.now(timezone.utc).date()
+        import datetime as _dt
+        target = _dt.date.fromisoformat(target_date)
+        days_ahead = (target - today).days + 1  # +1 to include target_date itself
+    except (ValueError, TypeError):
+        return None
+
+    if days_ahead < 1 or days_ahead > 16:
+        return None  # Ensemble API max horizon is 16 days
+
+    params = {
+        "latitude":         city["lat"],
+        "longitude":        city["lon"],
+        "daily":            "temperature_2m_max",
+        "temperature_unit": "celsius",
+        "timezone":         city["tz"],
+        "forecast_days":    days_ahead,
+        "models":           "gfs_seamless",  # 30-member ensemble, up to 16 days
+    }
+
+    try:
+        response = requests.get(ENSEMBLE_API_URL, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        logger.debug(f"Ensemble API failed for {city_name} {target_date}: {e}")
+        return None
+
+    daily = data.get("daily", {})
+    times = daily.get("time", [])
+
+    if target_date not in times:
+        return None
+
+    date_idx = times.index(target_date)
+
+    member_values = []
+    for key, values in daily.items():
+        if (key.startswith("temperature_2m_max_member")
+                and values and date_idx < len(values)):
+            val = values[date_idx]
+            if val is not None:
+                member_values.append(float(val))
+
+    if len(member_values) < 5:
+        logger.debug(
+            f"Too few ensemble members ({len(member_values)}) for {city_name} {target_date}"
+        )
+        return None
+
+    mean = sum(member_values) / len(member_values)
+    variance = sum((v - mean) ** 2 for v in member_values) / (len(member_values) - 1)
+    spread = variance ** 0.5
+    logger.debug(
+        f"Ensemble spread for {city_name} {target_date}: {spread:.2f}°C "
+        f"({len(member_values)} members)"
+    )
+    return spread
 
 
 def celsius_to_fahrenheit(c: float) -> float:

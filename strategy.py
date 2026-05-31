@@ -50,8 +50,8 @@ PROB_FLOOR_DEFAULT = 0.15  # Fallback for 7+ days
 # Keys are days-ahead (0 = today, 1 = tomorrow, etc.)
 # -----------------------------------------------------------------------
 SIGMA_BY_HORIZON_F = {
-    0: 2.0,    # Same-day: very tight
-    1: 2.5,    # Tomorrow: NWS MAE ~2-3F
+    0: 2.5,    # Same-day: NWS MAE ~2°F × 1.253 (MAE→sigma) → effective std ~2.64°F
+    1: 3.0,    # Tomorrow: NWS MAE ~2.5°F × 1.253 → effective std ~3.29°F
     2: 3.5,    # 2 days out
     3: 5.0,    # 3 days out
     4: 6.0,    # 4 days out: growing uncertainty
@@ -128,7 +128,9 @@ def _get_params(market_date_str: str, unit: str = "F") -> tuple:
 def forecast_probability(forecast_temp: float, bucket_low: float | None,
                           bucket_high: float | None, unit: str = "F",
                           model_uncertainty_deg: float = None,
-                          market_date: str = None) -> float:
+                          market_date: str = None,
+                          city_bias: float = 0.0,
+                          observed_max: float | None = None) -> float:
     """
     Estimates the probability that the actual temperature falls within the
     bucket [bucket_low, bucket_high] given a point forecast.
@@ -139,35 +141,47 @@ def forecast_probability(forecast_temp: float, bucket_low: float | None,
     probability to extreme outcomes, reducing overconfident bets).
 
     Args:
-        forecast_temp:        forecast temperature (in the same unit as bucket)
-        bucket_low:           lower bound of bucket (None = -infinity)
-        bucket_high:          upper bound of bucket (None = +infinity)
-        unit:                 "F" or "C"
+        forecast_temp:         forecast temperature (in the same unit as bucket)
+        bucket_low:            lower bound of bucket (None = -infinity)
+        bucket_high:           upper bound of bucket (None = +infinity)
+        unit:                  "F" or "C"
         model_uncertainty_deg: override sigma (degrees). If None, computed
-                              dynamically from market_date and unit.
-        market_date:          ISO date string for dynamic sigma/df calculation
+                               dynamically from market_date and unit.
+        market_date:           ISO date string for dynamic sigma/df calculation
+        city_bias:             additive mu offset to correct for systematic
+                               gridded-model vs station bias (+ = forecast runs warm).
+                               Negative value shifts mu down (forecast cooler).
+        observed_max:          running daily max observed so far (same unit as bucket).
+                               When provided and > mu, shifts mu up via Bayesian update:
+                               the final daily high cannot be below what's already been
+                               observed, so we condition on max_final >= observed_max.
 
     Returns:
         probability float in [0.001, 0.999]
     """
     if model_uncertainty_deg is not None:
         sigma = model_uncertainty_deg
-        # When sigma is overridden, use moderate df (no horizon info available)
         df = DF_BY_HORIZON.get(2, DF_DEFAULT)
     elif market_date is not None:
         sigma, df = _get_params(market_date, unit)
     else:
-        # Fallback: use unit-aware default (assumes ~2 day horizon)
         sigma = 3.5 if unit.upper() == "F" else 3.5 / 1.8
         df = DF_BY_HORIZON.get(2, DF_DEFAULT)
 
-    mu = forecast_temp
+    # Apply calibration bias: shifts forecast center by per-city systematic error
+    mu = forecast_temp + city_bias
+
+    # Bayesian intraday update: once we know the running daily max is observed_max,
+    # the final daily high is guaranteed to be >= observed_max.  If that floor
+    # exceeds the current forecast center, raise mu accordingly.  This prevents
+    # the model from assigning probability to outcomes already ruled out by observation.
+    if observed_max is not None and observed_max > mu:
+        mu = observed_max
 
     low_p  = t_dist.cdf(bucket_low,  df, loc=mu, scale=sigma) if bucket_low  is not None else 0.0
     high_p = t_dist.cdf(bucket_high, df, loc=mu, scale=sigma) if bucket_high is not None else 1.0
 
     prob = high_p - low_p
-    # Clamp to valid probability range
     return max(0.001, min(0.999, prob))
 
 

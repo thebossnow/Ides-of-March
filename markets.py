@@ -467,6 +467,64 @@ def get_bid_price(token_id: str, client: ClobClient = None) -> float | None:
         return None
 
 
+def get_ask_price(token_id: str, client: ClobClient = None) -> float | None:
+    """
+    Returns the best ask price from the order book.
+    Used for buy orders — a FOK buy placed at the ask gets an immediate fill
+    if the ask has size. Returns None if no asks exist (route to ladder bidding).
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        asks = book.asks or []
+        if asks:
+            return float(asks[0].price)
+        return None
+    except Exception as e:
+        logger.warning(f"Could not fetch ask price for {token_id}: {e}")
+        return None
+
+
+def get_book_snapshot(token_id: str, client: ClobClient = None) -> dict:
+    """
+    Returns bid, ask, mid, and illiquid flag from a single order book fetch.
+    Use this instead of multiple separate price calls to avoid 3× CLOB API
+    overhead per market during a scan cycle.
+
+    Returns dict with keys:
+        bid: float | None  (best bid price)
+        ask: float | None  (best ask price)
+        mid: float | None  (bid+ask)/2, or best side if one-sided
+        illiquid: bool     (True if spread > ILLIQUID_SPREAD or book is empty)
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        bids = book.bids or []
+        asks = book.asks or []
+        bid = float(bids[0].price) if bids else None
+        ask = float(asks[0].price) if asks else None
+        if bid is not None and ask is not None:
+            spread = ask - bid
+            illiquid = spread > ILLIQUID_SPREAD
+            mid = (bid + ask) / 2.0
+        elif ask is not None:
+            illiquid = True   # Only asks, no buyers — treat as illiquid
+            mid = ask
+        elif bid is not None:
+            illiquid = False  # Only bids, no asks — can sell but not buy
+            mid = bid
+        else:
+            illiquid = True
+            mid = None
+        return {"bid": bid, "ask": ask, "mid": mid, "illiquid": illiquid}
+    except Exception as e:
+        logger.warning(f"Could not fetch order book snapshot for {token_id}: {e}")
+        return {"bid": None, "ask": None, "mid": None, "illiquid": True}
+
+
 def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
     """
     Returns True if the order book is illiquid (spread > ILLIQUID_SPREAD,
