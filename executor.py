@@ -27,9 +27,9 @@ CHAIN_ID  = 137  # Polygon Mainnet
 SIG_TYPE  = int(os.getenv("POLYMARKET_SIG_TYPE", "2"))
 
 # -----------------------------------------------------------------------
-# SAFETY FLAG - Change to False ONLY when ready for live trading
+# SAFETY FLAG
 # -----------------------------------------------------------------------
-DRY_RUN = True
+DRY_RUN = False
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +221,7 @@ def place_sell_order(token_id: str, price: float, num_shares: float) -> dict:
             "price": price,
             "size": num_shares,
             "size_usdc": usdc_value,
+            "actual_shares": num_shares,
             "side": "SELL",
         }
 
@@ -236,9 +237,9 @@ def place_sell_order(token_id: str, price: float, num_shares: float) -> dict:
             )
             logger.warning(msg)
             if balance >= 5:
-                # Sell what we have instead of failing
+                # Sell only what we hold; caller must use actual_shares from response
+                logger.info(f"Adjusted sell to available balance: {balance:.2f} (was {num_shares:.2f})")
                 num_shares = balance
-                logger.info(f"Adjusted sell to available balance: {num_shares:.2f}")
             else:
                 return {"status": "REJECTED", "reason": "insufficient_balance"}
 
@@ -270,6 +271,9 @@ def place_sell_order(token_id: str, price: float, num_shares: float) -> dict:
             f"{num_shares:.2f} shares @ ${price:.4f} | "
             f"type=FOK | status={resp.get('status')}"
         )
+        # Always include actual_shares so callers can compute correct P&L
+        # even when balance was adjusted below the originally requested amount.
+        resp["actual_shares"] = num_shares
         return resp
 
     except Exception as e:
@@ -313,13 +317,14 @@ def place_ladder_bids(
     per_rung = size_usdc / len(prices)
 
     if DRY_RUN:
-        # Simulate: pretend the lowest rung fills
-        best_price = prices[0]
-        sim_shares = per_rung / best_price
+        # Simulate a realistic fill at the middle rung (not the cheapest $0.01).
+        # Using $0.01 gives 100x share count and massively overstates paper-trade P&L.
+        sim_price = prices[len(prices) // 2]  # e.g. $0.03 for default 5-rung ladder
+        sim_shares = per_rung / sim_price
         msg = (
             f"[DRY RUN] LADDER BID: {len(prices)} rungs "
             f"@ {[f'${p:.2f}' for p in prices]} | "
-            f"${per_rung:.2f}/rung | token={token_id[:16]}..."
+            f"${per_rung:.2f}/rung | sim fill @ ${sim_price:.2f} | token={token_id[:16]}..."
         )
         logger.info(msg)
         print(msg)
@@ -327,13 +332,13 @@ def place_ladder_bids(
             "status": "FILLED",
             "fills": [{
                 "orderID": "DRY_RUN_LADDER",
-                "price": best_price,
+                "price": sim_price,
                 "size_usdc": per_rung,
                 "shares": sim_shares,
             }],
             "cancelled": len(prices) - 1,
             "total_spent": per_rung,
-            "avg_price": best_price,
+            "avg_price": sim_price,
             "total_shares": sim_shares,
         }
 
@@ -342,6 +347,7 @@ def place_ladder_bids(
 
     client = get_client()
     placed_orders = []
+    fills = []  # populated during placement (MATCHED) and post-wait check (LIVE→filled)
 
     try:
         # Pre-fetch tick_size and neg_risk once for all rungs
@@ -380,13 +386,21 @@ def place_ladder_bids(
                     f"Ladder rung placed: ${price:.2f} x {num_shares:.1f} shares | "
                     f"id={order_id} status={status}"
                 )
-                placed_orders.append({
-                    "orderID": order_id,
-                    "price": price,
-                    "size_usdc": per_rung,
-                    "shares": num_shares,
-                    "status": status,
-                })
+                # Only track orders that were actually accepted (MATCHED or LIVE).
+                # Rejected/unknown statuses must not be counted as potential fills.
+                if status in ("MATCHED", "LIVE"):
+                    placed_orders.append({
+                        "orderID": order_id,
+                        "price": price,
+                        "size_usdc": per_rung,
+                        "shares": num_shares,
+                        "placement_status": status,
+                    })
+                    if status == "MATCHED":
+                        # Already filled at placement — count immediately as fill
+                        fills.append(placed_orders[-1])
+                else:
+                    logger.warning(f"Ladder rung ${price:.2f} rejected by CLOB: status={status}")
             except Exception as e:
                 logger.warning(f"Ladder rung ${price:.2f} failed: {e}")
 
@@ -406,27 +420,34 @@ def place_ladder_bids(
         )
         time.sleep(wait_seconds)
 
-        # Check which orders filled vs still open
-        fills = []
+        # Check which LIVE orders filled vs still open
         to_cancel = []
 
+        open_ids = None  # sentinel: None = lookup failed, can't confirm fills
         try:
             open_orders = client.get_orders()
             open_ids = {o.get("id", o.get("orderID", "")) for o in open_orders}
         except Exception as e:
-            logger.warning(f"Could not fetch open orders to check fills: {e}")
-            open_ids = set()
+            logger.warning(
+                f"Could not fetch open orders to check fills: {e}. "
+                f"Treating all LIVE rungs as unconfirmed and cancelling."
+            )
 
         for order in placed_orders:
             oid = order["orderID"]
-            if oid and oid not in open_ids:
-                # Not in open orders -> it filled (or was matched)
+            if order["placement_status"] == "MATCHED":
+                # Already counted as fill at placement time — skip
+                continue
+            # placement_status == "LIVE": order was resting; check if it filled
+            if open_ids is None:
+                # Lookup failed: don't assume fill. Attempt to cancel defensively.
+                if oid:
+                    to_cancel.append(oid)
+            elif oid and oid not in open_ids:
+                # No longer in open orders after wait → filled
                 fills.append(order)
             elif oid in open_ids:
                 to_cancel.append(oid)
-            # If status was already MATCHED at placement, count as fill
-            if order["status"] == "MATCHED" and order not in fills:
-                fills.append(order)
 
         # Cancel unfilled orders
         cancelled = 0

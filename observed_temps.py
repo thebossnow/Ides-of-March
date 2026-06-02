@@ -19,6 +19,7 @@ bucket boundary are flagged for manual review.
 import logging
 import time
 import requests
+import pytz
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional
 
@@ -139,7 +140,9 @@ def get_current_day_max(city: str) -> Optional[dict]:
         return None
 
     city_info = CITIES[city]
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    city_tz = pytz.timezone(city_info["tz"])
+    now_local = datetime.now(city_tz)
+    today_local_str = now_local.strftime("%Y-%m-%d")
 
     params = {
         "latitude": city_info["lat"],
@@ -147,9 +150,8 @@ def get_current_day_max(city: str) -> Optional[dict]:
         "hourly": "temperature_2m",
         "temperature_unit": "celsius",
         "timezone": city_info["tz"],
-        "start_date": today_str,
-        "end_date": today_str,
-        "past_hours": 24,  # Include all hours from today so far
+        "start_date": today_local_str,
+        "end_date": today_local_str,
     }
 
     try:
@@ -161,8 +163,10 @@ def get_current_day_max(city: str) -> Optional[dict]:
             logger.warning(f"No hourly data for {city} today")
             return None
 
-        # Filter out None values and future hours (which may be forecasts)
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        # Filter out None values and future hours.
+        # The API returns timestamps in the city's local timezone (timezone param above),
+        # so compare against local time — NOT UTC.
+        now_str = now_local.strftime("%Y-%m-%dT%H:%M")
         valid_temps = []
         last_time = None
         for t, temp in zip(times, temps):

@@ -113,47 +113,56 @@ def get_client() -> ClobClient:
 def get_weather_markets() -> list:
     """
     Fetches active, unresolved weather markets from the Gamma API.
-    Paginates through ALL active markets and filters by temperature keywords.
-    Returns a list of market dicts.
 
-    Note: Polymarket weather markets use the "Science" category and contain
-    keywords like "°F", "°C", or "high temperature" in the question.
-    The 'tag' parameter does not exist - we must scan and keyword-filter.
+    Uses the /events endpoint with tag_slug=daily-temperature — the only
+    reliable filter. The /markets slug_url parameter is silently ignored by
+    the API (returns random non-weather markets), and keyword-scanning all
+    10k+ markets is fragile. Events embed full market objects so no extra
+    calls are needed. Sorted newest-first so open events come first.
     """
     import requests
 
+    GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+
     all_markets = []
+    seen_slugs: set = set()
     offset = 0
     page_size = 100
 
     while True:
-        params = {
-            "active":  "true",
-            "closed":  "false",   # Only future/unresolved markets
-            "limit":   page_size,
-            "offset":  offset,
-        }
         try:
-            response = requests.get(GAMMA_URL, params=params, timeout=15)
-            response.raise_for_status()
-            batch = response.json()
+            r = requests.get(
+                GAMMA_EVENTS_URL,
+                params={
+                    "tag_slug":  "daily-temperature",
+                    "order":     "endDate",
+                    "ascending": "false",
+                    "limit":     page_size,
+                    "offset":    offset,
+                },
+                timeout=15,
+            )
+            r.raise_for_status()
+            events = r.json()
         except Exception as e:
-            logger.error(f"Failed to fetch markets (offset={offset}): {e}")
+            logger.error(f"Failed to fetch weather events (offset={offset}): {e}")
             break
 
-        if not batch:
+        if not events:
             break
 
-        for m in batch:
-            question = m.get("question", "").lower()
-            if any(kw in question for kw in WEATHER_KEYWORDS):
-                all_markets.append(m)
+        for event in events:
+            for market in event.get("markets", []):
+                slug = market.get("slug", "")
+                if slug and slug not in seen_slugs:
+                    seen_slugs.add(slug)
+                    all_markets.append(market)
 
-        if len(batch) < page_size:
-            break  # Last page
+        if len(events) < page_size:
+            break
         offset += page_size
 
-    logger.info(f"Found {len(all_markets)} weather markets (scanned {offset + len(batch)} total)")
+    logger.info(f"Found {len(all_markets)} weather markets from {offset + len(events)} events")
     return all_markets
 
 
@@ -409,6 +418,25 @@ def get_market_price(token_id: str, client: ClobClient = None) -> float | None:
 ILLIQUID_SPREAD = 0.50
 
 
+def _parse_book_sides(book) -> tuple:
+    """
+    Extracts (bids, asks) from a get_order_book() response.
+    Polymarket's py_clob_client changed return type from an OrderBook object
+    (with .bids/.asks attributes) to a plain dict ({'bids': [...], 'asks': [...]}).
+    This helper handles both formats transparently.
+    """
+    if isinstance(book, dict):
+        return book.get("bids") or [], book.get("asks") or []
+    return getattr(book, "bids", None) or [], getattr(book, "asks", None) or []
+
+
+def _entry_price(entry) -> float:
+    """Extracts price from an order book entry (dict {'price': ...} or object with .price)."""
+    if isinstance(entry, dict):
+        return float(entry["price"])
+    return float(entry.price)
+
+
 def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None:
     """
     Fetches the midpoint (bid+ask)/2 for a token from the order book.
@@ -423,11 +451,10 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
+        bids, asks = _parse_book_sides(book)
         if bids and asks:
-            best_bid = float(bids[0].price)
-            best_ask = float(asks[0].price)
+            best_bid = _entry_price(bids[0])
+            best_ask = _entry_price(asks[0])
             spread = best_ask - best_bid
             if spread > ILLIQUID_SPREAD:
                 logger.debug(
@@ -438,14 +465,89 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
                 return None
             return (best_bid + best_ask) / 2.0
         elif asks:
-            # Only asks, no bids at all -> illiquid
             return None
         elif bids:
-            return float(bids[0].price)
+            return _entry_price(bids[0])
         return None
     except Exception as e:
         logger.warning(f"Could not fetch order book for {token_id}: {e}")
         return None
+
+
+def get_bid_price(token_id: str, client: ClobClient = None) -> float | None:
+    """
+    Returns the best bid price from the order book.
+    Used for sell orders — a FOK sell must be placed at or below the best bid
+    to guarantee a fill. Returns None if no bids exist.
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        bids, _ = _parse_book_sides(book)
+        if bids:
+            return _entry_price(bids[0])
+        return None
+    except Exception as e:
+        logger.warning(f"Could not fetch bid price for {token_id}: {e}")
+        return None
+
+
+def get_ask_price(token_id: str, client: ClobClient = None) -> float | None:
+    """
+    Returns the best ask price from the order book.
+    Used for buy orders — a FOK buy placed at the ask gets an immediate fill
+    if the ask has size. Returns None if no asks exist (route to ladder bidding).
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        _, asks = _parse_book_sides(book)
+        if asks:
+            return _entry_price(asks[0])
+        return None
+    except Exception as e:
+        logger.warning(f"Could not fetch ask price for {token_id}: {e}")
+        return None
+
+
+def get_book_snapshot(token_id: str, client: ClobClient = None) -> dict:
+    """
+    Returns bid, ask, mid, and illiquid flag from a single order book fetch.
+    Use this instead of multiple separate price calls to avoid 3× CLOB API
+    overhead per market during a scan cycle.
+
+    Returns dict with keys:
+        bid: float | None  (best bid price)
+        ask: float | None  (best ask price)
+        mid: float | None  (bid+ask)/2, or best side if one-sided
+        illiquid: bool     (True if spread > ILLIQUID_SPREAD or book is empty)
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        bids, asks = _parse_book_sides(book)
+        bid = _entry_price(bids[0]) if bids else None
+        ask = _entry_price(asks[0]) if asks else None
+        if bid is not None and ask is not None:
+            spread = ask - bid
+            illiquid = spread > ILLIQUID_SPREAD
+            mid = (bid + ask) / 2.0
+        elif ask is not None:
+            illiquid = True   # Only asks, no buyers — treat as illiquid
+            mid = ask
+        elif bid is not None:
+            illiquid = False  # Only bids, no asks — can sell but not buy
+            mid = bid
+        else:
+            illiquid = True
+            mid = None
+        return {"bid": bid, "ask": ask, "mid": mid, "illiquid": illiquid}
+    except Exception as e:
+        logger.warning(f"Could not fetch order book snapshot for {token_id}: {e}")
+        return {"bid": None, "ask": None, "mid": None, "illiquid": True}
 
 
 def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
@@ -458,13 +560,10 @@ def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
+        bids, asks = _parse_book_sides(book)
         if not bids or not asks:
             return True
-        best_bid = float(bids[0].price)
-        best_ask = float(asks[0].price)
-        return (best_ask - best_bid) > ILLIQUID_SPREAD
+        return (_entry_price(asks[0]) - _entry_price(bids[0])) > ILLIQUID_SPREAD
     except Exception:
         return True
 

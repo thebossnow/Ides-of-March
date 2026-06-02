@@ -99,9 +99,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             forecast_prob   REAL,
             market_prob     REAL,
             edge            REAL,
+            forecast_temp_c REAL,   -- Open-Meteo forecast temp used at entry (Celsius)
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
+
+    # Add forecast_temp_c column if upgrading an existing database
+    try:
+        conn.execute("ALTER TABLE positions ADD COLUMN forecast_temp_c REAL")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
 
     # Indexes for common queries
     conn.execute("""
@@ -143,6 +151,7 @@ def record_entry(
     forecast_prob: float = 0.0,
     market_prob: float = 0.0,
     edge: float = 0.0,
+    forecast_temp_c: float = None,
 ) -> int:
     """
     Records a new position entry. Returns the row ID.
@@ -156,8 +165,8 @@ def record_entry(
             bucket_low, bucket_high, unit,
             entry_price, shares, size_usdc, entry_time, order_id,
             status, neg_risk,
-            question, forecast_prob, market_prob, edge
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+            question, forecast_prob, market_prob, edge, forecast_temp_c
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
         """,
         (
             token_id, condition_id, slug, city, market_date,
@@ -167,7 +176,7 @@ def record_entry(
             order_id,
             1 if neg_risk else 0,
             question[:500] if question else "",
-            forecast_prob, market_prob, edge,
+            forecast_prob, market_prob, edge, forecast_temp_c,
         ),
     )
     conn.commit()
@@ -184,10 +193,15 @@ def record_exit(
     exit_price: float,
     exit_reason: str,
     exit_order_id: str = None,
+    actual_shares: float = None,
 ) -> None:
     """
     Records a position exit (sold before resolution).
     Calculates P&L from entry vs exit price.
+
+    actual_shares: if provided, use this instead of the DB-recorded shares
+    (needed when the executor sold fewer shares than recorded, e.g. due to
+    insufficient balance at sell time).
     """
     conn = _get_conn()
     row = conn.execute(
@@ -199,8 +213,9 @@ def record_exit(
         logger.warning(f"Cannot record exit: position {position_id} not found")
         return
 
-    # P&L: (exit_price - entry_price) * shares
-    pnl = (exit_price - row["entry_price"]) * row["shares"]
+    shares_sold = actual_shares if actual_shares is not None else row["shares"]
+    # P&L: (exit_price - entry_price) * shares_sold
+    pnl = (exit_price - row["entry_price"]) * shares_sold
 
     conn.execute(
         """
@@ -404,7 +419,7 @@ def get_calibration_data() -> list[dict]:
         SELECT
             city, market_date, bucket_low, bucket_high, unit,
             forecast_prob, market_prob, edge,
-            actual_temp, actual_temp_source,
+            forecast_temp_c, actual_temp, actual_temp_source,
             status, pnl_usdc, entry_price, shares
         FROM positions
         WHERE status IN ('resolved_won', 'resolved_lost', 'redeemed')
