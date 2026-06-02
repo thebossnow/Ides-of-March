@@ -409,6 +409,25 @@ def get_market_price(token_id: str, client: ClobClient = None) -> float | None:
 ILLIQUID_SPREAD = 0.50
 
 
+def _parse_book_sides(book) -> tuple:
+    """
+    Extracts (bids, asks) from a get_order_book() response.
+    Polymarket's py_clob_client changed return type from an OrderBook object
+    (with .bids/.asks attributes) to a plain dict ({'bids': [...], 'asks': [...]}).
+    This helper handles both formats transparently.
+    """
+    if isinstance(book, dict):
+        return book.get("bids") or [], book.get("asks") or []
+    return getattr(book, "bids", None) or [], getattr(book, "asks", None) or []
+
+
+def _entry_price(entry) -> float:
+    """Extracts price from an order book entry (dict {'price': ...} or object with .price)."""
+    if isinstance(entry, dict):
+        return float(entry["price"])
+    return float(entry.price)
+
+
 def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None:
     """
     Fetches the midpoint (bid+ask)/2 for a token from the order book.
@@ -423,11 +442,10 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
+        bids, asks = _parse_book_sides(book)
         if bids and asks:
-            best_bid = float(bids[0].price)
-            best_ask = float(asks[0].price)
+            best_bid = _entry_price(bids[0])
+            best_ask = _entry_price(asks[0])
             spread = best_ask - best_bid
             if spread > ILLIQUID_SPREAD:
                 logger.debug(
@@ -438,10 +456,9 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
                 return None
             return (best_bid + best_ask) / 2.0
         elif asks:
-            # Only asks, no bids at all -> illiquid
             return None
         elif bids:
-            return float(bids[0].price)
+            return _entry_price(bids[0])
         return None
     except Exception as e:
         logger.warning(f"Could not fetch order book for {token_id}: {e}")
@@ -458,9 +475,9 @@ def get_bid_price(token_id: str, client: ClobClient = None) -> float | None:
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
+        bids, _ = _parse_book_sides(book)
         if bids:
-            return float(bids[0].price)
+            return _entry_price(bids[0])
         return None
     except Exception as e:
         logger.warning(f"Could not fetch bid price for {token_id}: {e}")
@@ -477,9 +494,9 @@ def get_ask_price(token_id: str, client: ClobClient = None) -> float | None:
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        asks = book.asks or []
+        _, asks = _parse_book_sides(book)
         if asks:
-            return float(asks[0].price)
+            return _entry_price(asks[0])
         return None
     except Exception as e:
         logger.warning(f"Could not fetch ask price for {token_id}: {e}")
@@ -502,10 +519,9 @@ def get_book_snapshot(token_id: str, client: ClobClient = None) -> dict:
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
-        bid = float(bids[0].price) if bids else None
-        ask = float(asks[0].price) if asks else None
+        bids, asks = _parse_book_sides(book)
+        bid = _entry_price(bids[0]) if bids else None
+        ask = _entry_price(asks[0]) if asks else None
         if bid is not None and ask is not None:
             spread = ask - bid
             illiquid = spread > ILLIQUID_SPREAD
@@ -535,13 +551,10 @@ def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
+        bids, asks = _parse_book_sides(book)
         if not bids or not asks:
             return True
-        best_bid = float(bids[0].price)
-        best_ask = float(asks[0].price)
-        return (best_ask - best_bid) > ILLIQUID_SPREAD
+        return (_entry_price(asks[0]) - _entry_price(bids[0])) > ILLIQUID_SPREAD
     except Exception:
         return True
 
