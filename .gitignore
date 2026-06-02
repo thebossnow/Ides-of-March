@@ -9,3 +9,4 @@ venv/
 *.db-journal
 *.tmp
 VPS files/
+POLYTERM_REVIEW.md
