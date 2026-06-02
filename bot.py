@@ -265,19 +265,21 @@ def _heartbeat_loop() -> None:
                 f"Heartbeat failed ({consecutive_failures}x): {error_str}"
             )
 
-            # Try to extract server-provided heartbeat_id from error response
-            # Error format: PolyApiException[..., error_message={'heartbeat_id': '...', 'error_msg': '...'}]
+            # Try to extract server-provided heartbeat_id from error response.
+            # PolyApiException stores the response body in .error_msg (not .error_message).
             try:
-                if hasattr(e, 'error_message') and isinstance(e.error_message, dict):
-                    new_hb_id = e.error_message.get("heartbeat_id")
+                err_body = getattr(e, 'error_msg', None)
+                if isinstance(err_body, dict):
+                    new_hb_id = err_body.get("heartbeat_id")
                     if new_hb_id:
                         logger.info(f"Heartbeat: extracted ID from error response: {new_hb_id}")
                         hb_id = new_hb_id
             except Exception as parse_err:
                 logger.debug(f"Heartbeat: could not parse error response: {parse_err}")
 
-            # Re-auth the client on auth errors
-            if "401" in error_str or "auth" in error_str.lower():
+            # Re-auth the client on auth errors (check status_code attr or string repr)
+            status_code = getattr(e, 'status_code', None)
+            if status_code == 401 or "401" in error_str or "auth" in error_str.lower():
                 try:
                     client = _get_clob_client_safe()
                     logger.info("Heartbeat: re-authenticated client")
