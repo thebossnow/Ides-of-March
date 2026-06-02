@@ -423,12 +423,15 @@ def place_ladder_bids(
         # Check which LIVE orders filled vs still open
         to_cancel = []
 
+        open_ids = None  # sentinel: None = lookup failed, can't confirm fills
         try:
             open_orders = client.get_orders()
             open_ids = {o.get("id", o.get("orderID", "")) for o in open_orders}
         except Exception as e:
-            logger.warning(f"Could not fetch open orders to check fills: {e}")
-            open_ids = set()
+            logger.warning(
+                f"Could not fetch open orders to check fills: {e}. "
+                f"Treating all LIVE rungs as unconfirmed and cancelling."
+            )
 
         for order in placed_orders:
             oid = order["orderID"]
@@ -436,7 +439,11 @@ def place_ladder_bids(
                 # Already counted as fill at placement time — skip
                 continue
             # placement_status == "LIVE": order was resting; check if it filled
-            if oid and oid not in open_ids:
+            if open_ids is None:
+                # Lookup failed: don't assume fill. Attempt to cancel defensively.
+                if oid:
+                    to_cancel.append(oid)
+            elif oid and oid not in open_ids:
                 # No longer in open orders after wait → filled
                 fills.append(order)
             elif oid in open_ids:

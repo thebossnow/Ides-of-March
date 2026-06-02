@@ -123,10 +123,10 @@ def run_calibration() -> dict:
 
 def get_city_bias(city: str, unit: str = "F") -> float:
     """
-    Returns the per-city temperature bias offset to apply to the forecast center.
+    Returns the mean forecast residual (forecast - actual) for the city.
 
-    A positive bias means Open-Meteo forecasts run *warm* for this city —
-    the returned value (negative) should be added to mu to correct it.
+    A positive value means Open-Meteo forecasts have been running *warm* —
+    the caller should *subtract* this from mu to correct (see strategy.py).
 
     Returns 0.0 if fewer than MIN_SAMPLES_FOR_BIAS resolved positions exist.
 
@@ -135,8 +135,7 @@ def get_city_bias(city: str, unit: str = "F") -> float:
         unit: "F" or "C" — determines return unit
 
     Returns:
-        bias offset in requested unit (negative = model runs warm, forecast
-        should be shifted cooler)
+        raw residual in requested unit (positive = forecast runs warm)
     """
     entry = _cache.get(city)
     if entry is None:

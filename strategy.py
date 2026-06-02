@@ -148,9 +148,10 @@ def forecast_probability(forecast_temp: float, bucket_low: float | None,
         model_uncertainty_deg: override sigma (degrees). If None, computed
                                dynamically from market_date and unit.
         market_date:           ISO date string for dynamic sigma/df calculation
-        city_bias:             additive mu offset to correct for systematic
-                               gridded-model vs station bias (+ = forecast runs warm).
-                               Negative value shifts mu down (forecast cooler).
+        city_bias:             measured forecast residual (forecast - actual) in
+                               the market's unit. Positive = forecast runs warm.
+                               Subtracted from mu so a warm-biased forecast is
+                               corrected downward toward the true mean.
         observed_max:          running daily max observed so far (same unit as bucket).
                                When provided and > mu, shifts mu up via Bayesian update:
                                the final daily high cannot be below what's already been
@@ -168,8 +169,9 @@ def forecast_probability(forecast_temp: float, bucket_low: float | None,
         sigma = 3.5 if unit.upper() == "F" else 3.5 / 1.8
         df = DF_BY_HORIZON.get(2, DF_DEFAULT)
 
-    # Apply calibration bias: shifts forecast center by per-city systematic error
-    mu = forecast_temp + city_bias
+    # Apply calibration bias: city_bias = mean(forecast - actual). Subtract to
+    # correct: if forecast historically runs warm (+bias), shift mu cooler.
+    mu = forecast_temp - city_bias
 
     # Bayesian intraday update: once we know the running daily max is observed_max,
     # the final daily high is guaranteed to be >= observed_max.  If that floor
