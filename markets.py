@@ -114,82 +114,55 @@ def get_weather_markets() -> list:
     """
     Fetches active, unresolved weather markets from the Gamma API.
 
-    Strategy (two-pass):
-    1. Slug search: query for 'highest-temperature' directly — fast and precise.
-    2. Full scan fallback: if slug search returns nothing, page through all
-       active markets and keyword-filter. This handles any Gamma API changes.
-
-    The `closed` filter is intentionally omitted: Polymarket sometimes marks
-    same-day markets as closed=true before they fully resolve, which would
-    cause us to miss valid trading opportunities.
+    Uses the /events endpoint with tag_slug=daily-temperature — the only
+    reliable filter. The /markets slug_url parameter is silently ignored by
+    the API (returns random non-weather markets), and keyword-scanning all
+    10k+ markets is fragile. Events embed full market objects so no extra
+    calls are needed. Sorted newest-first so open events come first.
     """
     import requests
 
-    # --- Pass 1: targeted slug search ---
-    slug_markets = []
-    for slug_prefix in ("highest-temperature", "high-temperature"):
-        try:
-            resp = requests.get(
-                GAMMA_URL,
-                params={"slug_url": slug_prefix, "active": "true", "limit": 100},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            batch = resp.json()
-            if isinstance(batch, list):
-                slug_markets.extend(batch)
-        except Exception as e:
-            logger.debug(f"Slug search '{slug_prefix}' failed: {e}")
+    GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 
-    # Deduplicate by conditionId
-    seen = set()
-    deduped = []
-    for m in slug_markets:
-        cid = m.get("conditionId", m.get("slug", ""))
-        if cid and cid not in seen:
-            seen.add(cid)
-            deduped.append(m)
-
-    if deduped:
-        logger.info(f"Found {len(deduped)} weather markets via slug search")
-        return deduped
-
-    # --- Pass 2: full scan fallback ---
-    logger.info("Slug search returned 0 results — falling back to full market scan")
     all_markets = []
+    seen_slugs: set = set()
     offset = 0
     page_size = 100
-    total_scanned = 0
 
     while True:
-        params = {
-            "active": "true",
-            "limit":  page_size,
-            "offset": offset,
-        }
         try:
-            response = requests.get(GAMMA_URL, params=params, timeout=15)
-            response.raise_for_status()
-            batch = response.json()
+            r = requests.get(
+                GAMMA_EVENTS_URL,
+                params={
+                    "tag_slug":  "daily-temperature",
+                    "order":     "endDate",
+                    "ascending": "false",
+                    "limit":     page_size,
+                    "offset":    offset,
+                },
+                timeout=15,
+            )
+            r.raise_for_status()
+            events = r.json()
         except Exception as e:
-            logger.error(f"Failed to fetch markets (offset={offset}): {e}")
+            logger.error(f"Failed to fetch weather events (offset={offset}): {e}")
             break
 
-        if not batch:
+        if not events:
             break
 
-        total_scanned += len(batch)
-        for m in batch:
-            question = m.get("question", "").lower()
-            slug = m.get("slug", "").lower()
-            if any(kw in question or kw in slug for kw in WEATHER_KEYWORDS):
-                all_markets.append(m)
+        for event in events:
+            for market in event.get("markets", []):
+                slug = market.get("slug", "")
+                if slug and slug not in seen_slugs:
+                    seen_slugs.add(slug)
+                    all_markets.append(market)
 
-        if len(batch) < page_size:
+        if len(events) < page_size:
             break
         offset += page_size
 
-    logger.info(f"Found {len(all_markets)} weather markets (full scan: {total_scanned} total)")
+    logger.info(f"Found {len(all_markets)} weather markets from {offset + len(events)} events")
     return all_markets
 
 
