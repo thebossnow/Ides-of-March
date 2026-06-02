@@ -77,10 +77,13 @@ FORECAST_DAYS       = 6    # Max days ahead to fetch forecasts (calibrated sigma
 LOG_LEVEL           = logging.INFO
 
 # Telegram Configuration
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID_RAW = os.environ.get("TELEGRAM_CHAT_ID")
 if not TELEGRAM_TOKEN:
-    raise EnvironmentError("TELEGRAM_TOKEN must be set in .env (no default allowed)")
+    raise EnvironmentError("TELEGRAM_TOKEN must be set in .env — no default allowed")
+if not TELEGRAM_CHAT_ID_RAW:
+    raise EnvironmentError("TELEGRAM_CHAT_ID must be set in .env — no default allowed")
+TELEGRAM_CHAT_ID = int(TELEGRAM_CHAT_ID_RAW)
 
 # Daily report time (UTC hour, 0-23). Default: 23:55 UTC
 DAILY_REPORT_HOUR   = 23
