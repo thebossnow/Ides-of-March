@@ -237,6 +237,7 @@ def redeem_all_winners(notifier=None) -> dict:
 
     redeemed = 0
     failed = 0
+    skipped = 0
     rate_limited = 0
     total_payout = 0.0
 
@@ -254,7 +255,7 @@ def redeem_all_winners(notifier=None) -> dict:
                 f"Position {pos['id']} ({pos['city']} {pos['market_date']}): "
                 f"shares={shares} — skipping redemption (no shares to redeem)"
             )
-            failed += 1
+            skipped += 1
             continue
 
         result = redeem_position(
@@ -304,6 +305,7 @@ def redeem_all_winners(notifier=None) -> dict:
     summary = {
         "total": len(winners),
         "redeemed": redeemed,
+        "skipped": skipped,
         "failed": failed,
         "rate_limited": rate_limited,
         "total_payout": round(total_payout, 2),

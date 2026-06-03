@@ -299,8 +299,15 @@ def _heartbeat_loop() -> None:
             # Try to extract server-provided heartbeat_id from error response
             # Error format: PolyApiException[..., error_message={'heartbeat_id': '...', 'error_msg': '...'}]
             try:
-                if hasattr(e, 'error_message') and isinstance(e.error_message, dict):
-                    new_hb_id = e.error_message.get("heartbeat_id")
+                # PolyApiException exposes the response body via error_msg (dict)
+                # or error_message depending on SDK version — check both.
+                hb_payload = None
+                if hasattr(e, 'error_msg') and isinstance(e.error_msg, dict):
+                    hb_payload = e.error_msg
+                elif hasattr(e, 'error_message') and isinstance(e.error_message, dict):
+                    hb_payload = e.error_message
+                if hb_payload:
+                    new_hb_id = hb_payload.get("heartbeat_id")
                     if new_hb_id:
                         logger.info(f"Heartbeat: extracted ID from error response: {new_hb_id}")
                         hb_id = new_hb_id
@@ -403,6 +410,8 @@ def run_cycle() -> None:
     MAX_DAILY_SPEND = cycle_bankroll * 0.5
 
     # Phase 0: Pre-fetch METAR observations for Bayesian same-day updates
+    raw_metar: dict = {}      # Initialised before try so bias block can always reference it
+    icao_to_city: dict = {}
     if USE_AVIATION_WEATHER:
         try:
             all_icao = list(AVIATION_ICAO.values())

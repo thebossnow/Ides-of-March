@@ -95,6 +95,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             -- Negative risk flag (needed for redemption)
             neg_risk        INTEGER DEFAULT 0,
 
+            -- Market direction (highest = daily MAX, lowest = daily MIN)
+            market_type     TEXT NOT NULL DEFAULT 'highest',
+
             -- Metadata
             question        TEXT,
             forecast_prob   REAL,
@@ -115,6 +118,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     for ddl in (
         "ALTER TABLE positions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'YES'",
         "ALTER TABLE positions ADD COLUMN entry_method TEXT NOT NULL DEFAULT 'buy'",
+        "ALTER TABLE positions ADD COLUMN market_type TEXT NOT NULL DEFAULT 'highest'",
     ):
         try:
             conn.execute(ddl)
@@ -168,6 +172,7 @@ def record_entry(
     edge: float = 0.0,
     outcome: str = "YES",
     entry_method: str = "buy",
+    market_type: str = "highest",
 ) -> int:
     """
     Records a new position entry. Returns the row ID.
@@ -177,6 +182,8 @@ def record_entry(
                   with all directional-buy callers.
     entry_method: 'buy' | 'split' | 'sweep'. Tracks how the position was
                   acquired (CLOB order vs CTF.splitPosition vs FOK book sweep).
+    market_type:  'highest' (daily MAX) or 'lowest' (daily MIN). Critical for
+                  correct resolution — lowest markets must resolve against MIN temp.
     """
     conn = _get_conn()
     cursor = conn.execute(
@@ -187,8 +194,8 @@ def record_entry(
             entry_price, shares, size_usdc, entry_time, order_id,
             status, neg_risk,
             question, forecast_prob, market_prob, edge,
-            outcome, entry_method
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)
+            outcome, entry_method, market_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             token_id, condition_id, slug, city, market_date,
@@ -201,6 +208,7 @@ def record_entry(
             forecast_prob, market_prob, edge,
             outcome.upper(),
             entry_method.lower(),
+            market_type.lower(),
         ),
     )
     conn.commit()

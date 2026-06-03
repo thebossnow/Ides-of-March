@@ -12,7 +12,7 @@ import logging
 import concurrent.futures
 from dotenv import load_dotenv
 # MIGRATION: Updated imports for CLOB V2 SDK
-from py_clob_client_v2 import ClobClient, OrderArgs, OrderType, PartialCreateOrderOptions, MarketOrderArgsV2, MarketOrderArgsV2
+from py_clob_client_v2 import ClobClient, OrderArgs, OrderType, PartialCreateOrderOptions, MarketOrderArgsV2
 from py_clob_client_v2 import BalanceAllowanceParams, AssetType
 from py_clob_client_v2.order_builder.constants import BUY, SELL
 from py_clob_client_v2.constants import BYTES32_ZERO
@@ -359,12 +359,14 @@ def place_sell_order(token_id: str, price: float, num_shares: float) -> dict:
 
         if faK_status == "FAK_EXCEPTION":
             # FAK failed (exception or no-match error). Retry as GTC.
+            # Re-sign the order — signed_order may be single-use (nonce/replay protection).
             logger.info(
                 f"FAK sell failed. Retrying as GTC limit order | "
                 f"token={token_id[:16]}... | {num_shares:.2f} @ ${price:.4f}"
             )
             try:
-                resp = client.post_order(signed_order, OrderType.GTC)
+                signed_order_gtc = client.create_order(order_args, options)
+                resp = client.post_order(signed_order_gtc, OrderType.GTC)
                 logger.info(
                     f"GTC sell order placed: id={resp.get('orderID')} | "
                     f"status={resp.get('status')}"

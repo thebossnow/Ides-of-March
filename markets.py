@@ -9,7 +9,7 @@ import re
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
+from py_clob_client_v2 import ClobClient
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ def get_client() -> ClobClient:
         signature_type=SIG_TYPE,  # Configurable: set POLYMARKET_SIG_TYPE in .env (default: 2)
         funder=funder.lower().strip(),  # Normalize: lowercase + strip whitespace
     )
-    client.set_api_creds(client.create_or_derive_api_creds())
+    client.set_api_creds(client.create_or_derive_api_key())
     return client
 
 

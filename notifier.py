@@ -201,8 +201,8 @@ class TelegramNotifier:
                               markets_scanned: int, elapsed_s: float) -> None:
         """Send a brief cycle completion summary."""
         self.send_message(
-            f"<b>Scan Complete</b>\\n"
-            f"Markets: {markets_scanned} | Trades: {trades_placed}\\n"
+            f"<b>Scan Complete</b>\n"
+            f"Markets: {markets_scanned} | Trades: {trades_placed}\n"
             f"Spent: ${total_spent:.2f} | Time: {elapsed_s:.1f}s"
         )
 
@@ -215,12 +215,12 @@ class TelegramNotifier:
         f_temp = round(forecast_temp_c * 9 / 5 + 32)
         icon = "✅" if any(k in skip_reason.lower() for k in ["trade", "placed", "entered"]) else "⏭️"
         self.send_message(
-            f"<b>{icon} New Weather Temp Market via WS</b>\\n"
-            f"City/Date: <b>{city} {date_str}</b>\\n"
-            f"Forecast High: <b>{forecast_temp_c:.1f}°C / {f_temp}°F</b>\\n"
-            f"Brackets: {brackets_str}\\n"
-            f"Edge: {edge:+.2%} | Reason: {skip_reason}\\n"
-            f"Slug: <code>{slug[:60]}...</code>\\n"
+            f"<b>{icon} New Weather Temp Market via WS</b>\n"
+            f"City/Date: <b>{city} {date_str}</b>\n"
+            f"Forecast High: <b>{forecast_temp_c:.1f}°C / {f_temp}°F</b>\n"
+            f"Brackets: {brackets_str}\n"
+            f"Edge: {edge:+.2%} | Reason: {skip_reason}\n"
+            f"Slug: <code>{slug[:60]}...</code>\n"
             f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
         )
         # Also record as skipped for daily stats (unless it traded)
@@ -254,21 +254,21 @@ class TelegramNotifier:
         end_warning = " (API fallback)" if end_balance == _FALLBACK_VAL else ""
 
         report = (
-            f"<b>Daily Weather Bot Report</b>\\n"
-            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}\\n"
-            f"\\n"
-            f"<b>Balance</b>\\n"
-            f"  Start:   ${start_bal:.2f}{start_warning}\\n"
-            f"  End:     ${end_balance:.2f}{end_warning}\\n"
-            f"  P&L:     ${pnl:+.2f} ({pnl_pct:+.1f}%)\\n"
-            f"\\n"
-            f"<b>Trades</b>\\n"
-            f"  Executed:    {entered}\\n"
-            f"  In Progress: {in_progress}\\n"
-            f"  Won:         {won}\\n"
-            f"  Lost:        {lost}\\n"
-            f"  Skipped:     {skipped}\\n"
-            f"  Total Spent: ${total_spent:.2f}\\n"
+            f"<b>Daily Weather Bot Report</b>\n"
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+            f"\n"
+            f"<b>Balance</b>\n"
+            f"  Start:   ${start_bal:.2f}{start_warning}\n"
+            f"  End:     ${end_balance:.2f}{end_warning}\n"
+            f"  P&L:     ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+            f"\n"
+            f"<b>Trades</b>\n"
+            f"  Executed:    {entered}\n"
+            f"  In Progress: {in_progress}\n"
+            f"  Won:         {won}\n"
+            f"  Lost:        {lost}\n"
+            f"  Skipped:     {skipped}\n"
+            f"  Total Spent: ${total_spent:.2f}\n"
         )
 
         self.send_message(report)
