@@ -2,18 +2,19 @@
 observed_temps.py - Fetches actual observed temperatures and resolves positions.
 
 Two main capabilities:
-1. Historical daily max: for positions where market_date has passed, fetch the
-   actual recorded high temperature and determine win/loss.
+1. Historical daily max/min: for positions where market_date has passed, fetch the
+   actual recorded temperature and determine win/loss.
 2. Intra-day current max: for same-day positions, fetch hourly observations to
    get the running daily high so far (used by position_monitor.py for exits).
 
-Uses Open-Meteo Archive API (free, no key) for historical data and
-Open-Meteo Forecast API hourly endpoint for same-day observations.
+Resolution source priority (Item 1 fix):
+1. Wunderground forecast (get_wu_resolution_temp) — WU's own prediction of what
+   their station will report. This IS the resolution source.
+2. Open-Meteo Archive (ERA5 reanalysis) — fallback when WU data unavailable.
 
-Open-Meteo historical data uses ERA5 reanalysis blended with station data.
-This may differ from the exact station Polymarket uses for resolution by
-1-2 degrees. Positions where the actual temp lands within 1 degree of a
-bucket boundary are flagged for manual review.
+Previously used only Open-Meteo Archive, which differs from WU station readings
+by 1-2°C. The WU forecast API provides WU's own prediction of what their station
+will report — far more aligned with the actual resolution.
 """
 
 import logging
@@ -25,7 +26,8 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Reuse city coordinates from weather.py
-from weather import CITIES, celsius_to_fahrenheit
+from weather import CITIES, celsius_to_fahrenheit, get_primary_icao
+from aviation_weather import get_metar_current_day_max
 
 # Open-Meteo Archive API (free, no key, historical observations)
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -65,41 +67,72 @@ def _fetch_with_retry(url: str, params: dict) -> dict:
     )
 
 
-def get_historical_max_temp(city: str, target_date: str) -> Optional[dict]:
-    """
-    Fetches the actual recorded daily max temperature for a past date.
+def get_historical_max_temp(
+    city: str,
+    target_date: str,
+    market_type: str = "highest",
+) -> Optional[dict]:
+    """Fetch the actual recorded daily max/min temperature for a past date.
+
+    Source priority:
+    1. Wunderground forecast (get_wu_resolution_temp) — WU's own prediction of
+       what their station will report. This IS the resolution source.
+    2. Open-Meteo Archive (ERA5 reanalysis) — fallback when WU data unavailable.
 
     Args:
-        city: City key matching weather.py CITIES dict
-        target_date: ISO date string (YYYY-MM-DD), must be in the past
+        city: City key matching weather.py CITIES dict.
+        target_date: ISO date string (YYYY-MM-DD), must be in the past.
+        market_type: "highest" for daily max, "lowest" for daily min.
 
     Returns:
         dict with keys:
             temp_c: float (Celsius)
             temp_f: float (Fahrenheit)
-            source: str ("open-meteo-archive")
+            source: str ("wunderground-forecast" or "open-meteo-archive")
             date: str
-        or None on failure
+        or None on failure.
     """
     if city not in CITIES:
         logger.warning(f"Unknown city for historical temp: {city}")
         return None
 
+    # ── Primary: Wunderground (resolution source's own forecast) ──
+    try:
+        from wunderground_client import get_wu_resolution_temp
+        wu_result = get_wu_resolution_temp(city, target_date, market_type=market_type)
+        if wu_result is not None:
+            logger.info(
+                f"Resolution: {city} {target_date} | {market_type}={wu_result['temp_c']}C "
+                f"(source=wunderground-forecast)"
+            )
+            return wu_result
+    except Exception as e:
+        logger.debug(f"WU resolution fetch failed for {city} {target_date}: {e}")
+
+    # ── Fallback: Open-Meteo Archive (ERA5 reanalysis) ──
+    logger.info(
+        f"Resolution fallback: {city} {target_date} | using Open-Meteo Archive "
+        f"(WU data unavailable)"
+    )
+
     city_info = CITIES[city]
+
+    # For "lowest" markets, fetch min temp; for "highest", fetch max temp
+    daily_param = "temperature_2m_min" if market_type == "lowest" else "temperature_2m_max"
 
     params = {
         "latitude": city_info["lat"],
         "longitude": city_info["lon"],
         "start_date": target_date,
         "end_date": target_date,
-        "daily": "temperature_2m_max",
+        "daily": daily_param,
         "temperature_unit": "celsius",
         "timezone": city_info["tz"],
     }
 
     try:
         data = _fetch_with_retry(ARCHIVE_URL, params)
-        temps = data.get("daily", {}).get("temperature_2m_max", [])
+        temps = data.get("daily", {}).get(daily_param, [])
         dates = data.get("daily", {}).get("time", [])
 
         if not temps or temps[0] is None:
@@ -119,25 +152,46 @@ def get_historical_max_temp(city: str, target_date: str) -> Optional[dict]:
         return None
 
 
-def get_current_day_max(city: str) -> Optional[dict]:
-    """
-    Fetches the current running daily max temperature for today.
-    Uses hourly observations from the forecast API (which includes
-    past hours for today).
+def get_current_day_max(
+    city: str,
+    prefer_aviation: bool = True,
+) -> Optional[dict]:
+    """Fetches the current running daily max temperature for today.
+
+    When *prefer_aviation* is True, tries the METAR observation for the
+    city's primary ICAO station first.  On any failure or missing data,
+    falls back to Open-Meteo hourly observations.
 
     Returns:
         dict with keys:
             temp_c: float (highest hourly temp so far today)
             temp_f: float
-            source: str ("open-meteo-hourly")
-            hour_count: int (number of hours of data)
-            last_hour: str (time of last observation)
-        or None on failure
+            source: str ("metar" or "open-meteo-hourly")
+            hour_count: int (number of hours of data, Open-Meteo only)
+            last_hour: str (time of last observation, Open-Meteo only)
+        or None on failure.
     """
     if city not in CITIES:
         logger.warning(f"Unknown city for current max: {city}")
         return None
 
+    # --- Aviation / METAR path ---
+    if prefer_aviation:
+        icao = get_primary_icao(city)
+        if icao:
+            try:
+                metar_data = get_metar_current_day_max(icao)
+                if metar_data is not None:
+                    logger.info(
+                        "METAR temp for %s (%s): %.1fC / %.1fF",
+                        city, icao, metar_data["temp_c"], metar_data["temp_f"],
+                    )
+                    return metar_data
+                logger.debug("METAR returned no data for %s (%s), falling back to Open-Meteo", city, icao)
+            except Exception as exc:
+                logger.debug("METAR fetch failed for %s (%s): %s. Falling back to Open-Meteo", city, icao, exc)
+
+    # --- Open-Meteo hourly fallback ---
     city_info = CITIES[city]
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -240,15 +294,16 @@ def resolve_positions(positions: list[dict]) -> list[dict]:
     """
     results = []
     # Cache to avoid duplicate API calls for same city/date
-    temp_cache = {}
+    temp_cache: dict = {}
 
     for pos in positions:
         city = pos["city"]
         market_date = pos["market_date"]
-        cache_key = (city, market_date)
+        market_type = pos.get("market_type", "highest")
+        cache_key = (city, market_date, market_type)
 
         if cache_key not in temp_cache:
-            temp_data = get_historical_max_temp(city, market_date)
+            temp_data = get_historical_max_temp(city, market_date, market_type=market_type)
             temp_cache[cache_key] = temp_data
 
         temp_data = temp_cache[cache_key]
@@ -291,7 +346,8 @@ def resolve_positions(positions: list[dict]) -> list[dict]:
         logger.info(
             f"Resolution: {city} {market_date} | actual={actual_temp:.1f}{unit} | "
             f"bucket=[{pos['bucket_low']},{pos['bucket_high']}]{unit} | "
-            f"{status_str} (margin={bucket_result['margin']:.1f}){boundary_str}"
+            f"{status_str} (margin={bucket_result['margin']:.1f}){boundary_str} | "
+            f"source={temp_data['source']}"
         )
 
     return results
@@ -339,3 +395,12 @@ if __name__ == "__main__":
         r = check_bucket_result(actual, low, high)
         flag = " [BOUNDARY]" if r["boundary_flag"] else ""
         print(f"  {desc}: {'WON' if r['won'] else 'LOST'} | margin={r['margin']}{flag}")
+
+    # Aviation weather integration test
+    print("\n--- Aviation METAR test: NYC (KJFK) ---")
+    metar_result = get_current_day_max("NYC", prefer_aviation=True)
+    if metar_result:
+        print(f"  Temp: {metar_result['temp_c']:.1f}C / {metar_result['temp_f']:.1f}F")
+        print(f"  Source: {metar_result['source']}")
+    else:
+        print("  No METAR data (fell back to Open-Meteo or no data)")

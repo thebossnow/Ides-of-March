@@ -175,11 +175,25 @@ class TelegramNotifier:
             f"Slug: <code>{slug[:60]}</code>"
         )
 
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        """Strip HTML tags from text to prevent Telegram parse errors."""
+        import re
+        # Remove HTML tags and their content for script/style
+        text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Remove remaining HTML tags
+        text = re.sub(r'<[^>]+>', '', text)
+        # Collapse whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
     def notify_error(self, component: str, error: str) -> None:
-        """Send error alert via Telegram."""
+        """Send error alert via Telegram. HTML is stripped to prevent parse errors."""
+        safe_error = self._strip_html(str(error))[:500]
         self.send_message(
             f"<b>[!] Error in {component}</b>\n"
-            f"<code>{str(error)[:500]}</code>\n"
+            f"<code>{safe_error}</code>\n"
             f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
         )
 
@@ -187,16 +201,40 @@ class TelegramNotifier:
                               markets_scanned: int, elapsed_s: float) -> None:
         """Send a brief cycle completion summary."""
         self.send_message(
-            f"<b>Scan Complete</b>\n"
-            f"Markets: {markets_scanned} | Trades: {trades_placed}\n"
+            f"<b>Scan Complete</b>\\n"
+            f"Markets: {markets_scanned} | Trades: {trades_placed}\\n"
             f"Spent: ${total_spent:.2f} | Time: {elapsed_s:.1f}s"
         )
+
+    def notify_new_weather_market(self, city: str, date_str: str, forecast_temp_c: float,
+                                  brackets: list, edge: float, skip_reason: str, slug: str = "") -> None:
+        """Send detailed notification when a new weather temperature market hits the sniper websocket.
+        Includes available brackets, forecast from weather layer, and exact skip/trade reason.
+        This helps debug sniper WS connectivity and strategy logic."""
+        brackets_str = ", ".join(str(b) for b in brackets) if brackets else "N/A"
+        f_temp = round(forecast_temp_c * 9 / 5 + 32)
+        icon = "✅" if any(k in skip_reason.lower() for k in ["trade", "placed", "entered"]) else "⏭️"
+        self.send_message(
+            f"<b>{icon} New Weather Temp Market via WS</b>\\n"
+            f"City/Date: <b>{city} {date_str}</b>\\n"
+            f"Forecast High: <b>{forecast_temp_c:.1f}°C / {f_temp}°F</b>\\n"
+            f"Brackets: {brackets_str}\\n"
+            f"Edge: {edge:+.2%} | Reason: {skip_reason}\\n"
+            f"Slug: <code>{slug[:60]}...</code>\\n"
+            f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        )
+        # Also record as skipped for daily stats (unless it traded)
+        if "trade" not in skip_reason.lower():
+            self.record_trade(entered=False)
 
     def send_daily_report(self, end_balance: float) -> None:
         """
         Send the daily summary report.
         Includes balance, P&L, trade counts by status.
+        Flags when balance looks like the $200 API fallback.
         """
+        _FALLBACK_VAL = 200.0
+
         with self._lock:
             stats = dict(self.daily_stats)
 
@@ -211,22 +249,26 @@ class TelegramNotifier:
         in_progress = stats["trades_in_progress"]
         total_spent = stats["total_spent"]
 
+        # Flag if either balance looks like the API fallback
+        start_warning = " (API fallback)" if start_bal == _FALLBACK_VAL else ""
+        end_warning = " (API fallback)" if end_balance == _FALLBACK_VAL else ""
+
         report = (
-            f"<b>Daily Weather Bot Report</b>\n"
-            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
-            f"\n"
-            f"<b>Balance</b>\n"
-            f"  Start:   ${start_bal:.2f}\n"
-            f"  End:     ${end_balance:.2f}\n"
-            f"  P&L:     ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
-            f"\n"
-            f"<b>Trades</b>\n"
-            f"  Executed:    {entered}\n"
-            f"  In Progress: {in_progress}\n"
-            f"  Won:         {won}\n"
-            f"  Lost:        {lost}\n"
-            f"  Skipped:     {skipped}\n"
-            f"  Total Spent: ${total_spent:.2f}\n"
+            f"<b>Daily Weather Bot Report</b>\\n"
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}\\n"
+            f"\\n"
+            f"<b>Balance</b>\\n"
+            f"  Start:   ${start_bal:.2f}{start_warning}\\n"
+            f"  End:     ${end_balance:.2f}{end_warning}\\n"
+            f"  P&L:     ${pnl:+.2f} ({pnl_pct:+.1f}%)\\n"
+            f"\\n"
+            f"<b>Trades</b>\\n"
+            f"  Executed:    {entered}\\n"
+            f"  In Progress: {in_progress}\\n"
+            f"  Won:         {won}\\n"
+            f"  Lost:        {lost}\\n"
+            f"  Skipped:     {skipped}\\n"
+            f"  Total Spent: ${total_spent:.2f}\\n"
         )
 
         self.send_message(report)

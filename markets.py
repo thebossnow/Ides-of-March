@@ -88,6 +88,20 @@ CITY_ALIASES = {
     "lucknow":          "Lucknow",
     # Oceania
     "wellington":       "Wellington",
+    # Additional cities
+    "amsterdam":        "Amsterdam",
+    "helsinki":          "Helsinki",
+    "panama city":      "Panama City",
+    "kuala lumpur":     "Kuala Lumpur",
+    "jakarta":          "Jakarta",
+    # Additional cities added 2026-04-19
+    "busan":            "Busan",
+    "cape town":        "Cape Town",
+    "guangzhou":        "Guangzhou",
+    "jeddah":           "Jeddah",
+    "karachi":          "Karachi",
+    "lagos":            "Lagos",
+    "manila":           "Manila",
 }
 
 
@@ -112,48 +126,79 @@ def get_client() -> ClobClient:
 
 def get_weather_markets() -> list:
     """
-    Fetches active, unresolved weather markets from the Gamma API.
-    Paginates through ALL active markets and filters by temperature keywords.
-    Returns a list of market dicts.
+    Fetches active temperature markets using the Gamma API events endpoint.
 
-    Note: Polymarket weather markets use the "Science" category and contain
-    keywords like "°F", "°C", or "high temperature" in the question.
-    The 'tag' parameter does not exist - we must scan and keyword-filter.
+    The old approach queried /series first, but that endpoint only returns 2
+    series (Dallas and Hong Kong) even though 50+ city series exist. The root
+    cause: the /series endpoint silently omits series that have the
+    'hide-from-new' tag, which all current city weather series carry.
+
+    Correct approach:
+      - Query /events?tag_slug=daily-temperature&order=endDate&ascending=false
+        This returns all city-day events newest-first so open events come first
+        without paginating through thousands of historical closed events.
+      - Stop as soon as the API returns a page containing only closed events —
+        since results are sorted newest-first this is safe and fast.
+      - Events embed full market objects, no extra calls needed.
     """
     import requests
 
+    GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+
     all_markets = []
+    seen_slugs: set = set()
+    city_series: set = set()
     offset = 0
-    page_size = 100
 
     while True:
-        params = {
-            "active":  "true",
-            "closed":  "false",   # Only future/unresolved markets
-            "limit":   page_size,
-            "offset":  offset,
-        }
         try:
-            response = requests.get(GAMMA_URL, params=params, timeout=15)
-            response.raise_for_status()
-            batch = response.json()
+            r = requests.get(
+                GAMMA_EVENTS_URL,
+                params={
+                    "tag_slug":  "daily-temperature",
+                    "order":     "endDate",
+                    "ascending": "false",
+                    "limit":     100,
+                    "offset":    offset,
+                },
+                timeout=15,
+            )
+            r.raise_for_status()
+            batch = r.json()
         except Exception as e:
-            logger.error(f"Failed to fetch markets (offset={offset}): {e}")
+            logger.error(f"Failed to fetch temperature events (offset={offset}): {e}")
             break
 
-        if not batch:
+        if not isinstance(batch, list) or not batch:
             break
 
-        for m in batch:
-            question = m.get("question", "").lower()
-            if any(kw in question for kw in WEATHER_KEYWORDS):
-                all_markets.append(m)
+        open_in_batch = 0
+        for event in batch:
+            if event.get("closed"):
+                continue
+            open_in_batch += 1
+            series_slug = event.get("seriesSlug", "")
+            if series_slug:
+                city_series.add(series_slug)
+            for m in event.get("markets", []):
+                slug = m.get("slug", "")
+                if slug and slug not in seen_slugs and m.get("active") and not m.get("closed"):
+                    all_markets.append(m)
+                    seen_slugs.add(slug)
 
-        if len(batch) < page_size:
-            break  # Last page
-        offset += page_size
+        # Sorted newest-first: once an entire page is closed, all subsequent
+        # pages will also be closed — stop paginating.
+        if open_in_batch == 0:
+            break
 
-    logger.info(f"Found {len(all_markets)} weather markets (scanned {offset + len(batch)} total)")
+        if len(batch) < 100:
+            break
+        offset += 100
+
+    logger.info(
+        f"Found {len(all_markets)} active weather markets across "
+        f"{len(city_series)} city series"
+    )
     return all_markets
 
 
@@ -194,16 +239,63 @@ def get_yes_token_id(market: dict) -> str | None:
     return None
 
 
+def get_no_token_id(market: dict) -> str | None:
+    """
+    Returns the tokenId for the NO outcome of a binary market.
+    Mirror of get_yes_token_id: matches outcome label first, then falls back
+    to clobTokenIds[1]. Used by ctf.py split/merge bookkeeping (need both
+    legs to track inventory and merge complementary pairs).
+    """
+    token_ids = _parse_json_field(market.get("clobTokenIds", []))
+    outcomes  = _parse_json_field(market.get("outcomes", []))
+
+    for i, outcome in enumerate(outcomes):
+        if outcome.upper() in ("NO", "FALSE") and i < len(token_ids):
+            return str(token_ids[i])
+
+    if len(token_ids) >= 2:
+        return str(token_ids[1])
+    return None
+
+
+def get_neg_risk_flag(market: dict) -> bool:
+    """
+    Detects whether a market uses the NegRiskAdapter for split/merge/redeem.
+
+    Polymarket fields are inconsistent across API surfaces:
+      - Gamma API:    "negRisk" (camelCase)
+      - CLOB API:     "neg_risk" (snake)
+      - WS new_market events: usually "negRisk"
+    We accept any of them, defaulting to False.
+    """
+    for key in ("negRisk", "neg_risk", "negRiskMarket"):
+        if key in market:
+            return bool(market.get(key))
+    return False
+
+
 def parse_market_metadata(market: dict) -> dict | None:
     """
     Attempts to extract city, date, and temperature bucket from a market.
     Tries the human-readable question first, then falls back to parsing
     the slug (which has a deterministic format on Polymarket).
     Returns a metadata dict or None if unparseable.
+
+    The returned dict's "market_type" field is "highest" or "lowest".
+    Callers must route "lowest" markets to get_forecast_low() (daily MIN)
+    and "highest" markets to get_forecast() (daily MAX).
     """
     question     = market.get("question", "")
     slug         = market.get("slug", "")
     condition_id = market.get("conditionId", "")
+
+    # Detect market type (highest-temp = daily MAX, lowest-temp = daily MIN).
+    s_lower = slug.lower()
+    q_lower = question.lower()
+    if "lowest-temperature" in s_lower or "lowest temperature" in q_lower:
+        market_type = "lowest"
+    else:
+        market_type = "highest"
 
     # --- Try question-based parsing first ---
     city_key = _identify_city(question)
@@ -228,7 +320,16 @@ def parse_market_metadata(market: dict) -> dict | None:
         logger.debug(f"Could not extract temp bounds from: {question} / {slug}")
         return None
 
+    # Permanent fix for unrealistic bucket definitions (e.g. '19-19', zero-width, or malformed ranges)
+    # Ensure all closed buckets are at least 1 degree wide. This matches Polymarket's actual 1° increments.
+    b = bounds
+    if b.get("low") is not None and b.get("high") is not None and b["high"] - b["low"] < 0.1:
+        logger.warning(f"Zero-width bucket normalized {b['low']}-{b['high']} → {b['low']}-{b['low']+1.0} for {slug}")
+        b["high"] = b["low"] + 1.0
+
     yes_token_id = get_yes_token_id(market)
+    no_token_id  = get_no_token_id(market)
+    neg_risk     = get_neg_risk_flag(market)
 
     return {
         "city":          city_key,
@@ -239,6 +340,10 @@ def parse_market_metadata(market: dict) -> dict | None:
         "question":      question,
         "condition_id":  condition_id,
         "yes_token_id":  yes_token_id,
+        "no_token_id":   no_token_id,
+        "neg_risk":      neg_risk,
+        "market_type":   market_type,
+        "slug":          slug,
     }
 
 
@@ -290,12 +395,14 @@ def _parse_from_slug(slug: str) -> dict | None:
 
     s = slug.lower().strip()
 
-    # Must be a weather market slug
-    if not s.startswith("highest-temperature-in-"):
+    # Must be a weather market slug (highest OR lowest temperature)
+    if s.startswith("highest-temperature-in-"):
+        rest = s[len("highest-temperature-in-"):]
+    elif s.startswith("lowest-temperature-in-"):
+        rest = s[len("lowest-temperature-in-"):]
+    else:
         return None
-
-    # Strip prefix
-    rest = s[len("highest-temperature-in-"):]  # e.g. "chengdu-on-april-3-2026-20corbelow"
+    # e.g. "chengdu-on-april-3-2026-20corbelow"
 
     # Find "-on-" to split city from date+temp
     on_idx = rest.find("-on-")
@@ -351,30 +458,38 @@ def _parse_from_slug(slug: str) -> dict | None:
 def _parse_slug_temp(temp_part: str) -> dict | None:
     """
     Parses the temperature suffix from a slug.
-    Examples: "20corbelow", "84forhigher", "52-53f", "10c"
+    Examples: "20corbelow", "84forhigher", "52-53f", "10c", "neg-1c", "neg-3corbelow"
+
+    Polymarket encodes negative temps as "neg-X" in slugs (e.g. "neg-1c" = -1°C).
     """
     t = temp_part.strip()
 
-    # Range: "52-53f" or "52-53c"
+    # Normalize "neg-" prefix to actual negative sign for parsing.
+    # "neg-1c" -> "-1c", "neg-3corbelow" -> "-3corbelow"
+    if t.startswith("neg-"):
+        t = "-" + t[4:]
+
+    # Range: "52-53f" or "52-53c" (only positive ranges exist on Polymarket)
     m = re.match(r'^(\d+)-(\d+)([fc])$', t)
     if m:
         unit = "F" if m.group(3) == "f" else "C"
         return {"low": float(m.group(1)), "high": float(m.group(2)), "unit": unit}
 
-    # "Xforbelow" or "Xcorbelow" (or below)
-    m = re.match(r'^(\d+)([fc])orbelow$', t)
+    # "Xforbelow" or "Xcorbelow" (or below) - supports negative temps
+    m = re.match(r'^(-?\d+)([fc])orbelow$', t)
     if m:
         unit = "F" if m.group(2) == "f" else "C"
         return {"low": None, "high": float(m.group(1)), "unit": unit}
 
-    # "Xforhigher" or "Xcorhigher" (or higher)
-    m = re.match(r'^(\d+)([fc])orhigher$', t)
+    # "Xforhigher" or "Xcorhigher" (or higher) - supports negative temps
+    m = re.match(r'^(-?\d+)([fc])orhigher$', t)
     if m:
         unit = "F" if m.group(2) == "f" else "C"
         return {"low": float(m.group(1)), "high": None, "unit": unit}
 
-    # Exact degree: "10c" or "65f" (bucket = [X, X+1))
-    m = re.match(r'^(\d+)([fc])$', t)
+    # Exact degree: "10c", "65f", "-1c" (bucket = [X, X+1))
+    # Also fixes unrealistic zero-width buckets like "19-19" reported by user
+    m = re.match(r'^(-?\d+)([fc])$', t)
     if m:
         val  = float(m.group(1))
         unit = "F" if m.group(2) == "f" else "C"
@@ -405,8 +520,12 @@ def get_market_price(token_id: str, client: ClobClient = None) -> float | None:
 
 
 # Spread threshold: books wider than this are considered "illiquid" and
-# get routed to the ladder-bid path instead of using the midpoint.
-ILLIQUID_SPREAD = 0.50
+# get routed to the book-sweep / last-trade-price path instead of the midpoint FOK.
+# Prices are probabilities (0-1), so 0.50 was far too permissive -- it let markets
+# with bid=$0.01 / ask=$0.51 pass as "liquid". 0.15 means a market with a bid of
+# $0.30 and ask of $0.45 (spread $0.15) is still considered liquid; anything wider
+# routes to the book-sweep execution path.
+ILLIQUID_SPREAD = 0.15
 
 
 def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None:
@@ -441,7 +560,13 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
             # Only asks, no bids at all -> illiquid
             return None
         elif bids:
-            return float(bids[0].price)
+            # Only bids, no asks -> no sellers to match a FOK buy against.
+            # Treat as illiquid so the caller routes to ladder bids.
+            logger.debug(
+                f"Bids-only book for {token_id[:16]}...: "
+                f"best_bid={float(bids[0].price)} no asks -> illiquid"
+            )
+            return None
         return None
     except Exception as e:
         logger.warning(f"Could not fetch order book for {token_id}: {e}")
@@ -467,6 +592,41 @@ def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
         return (best_ask - best_bid) > ILLIQUID_SPREAD
     except Exception:
         return True
+
+
+def get_book_asks(token_id: str, client: ClobClient = None) -> list[tuple[float, float]]:
+    """
+    Returns the ask side of the order book as sorted (price, size) tuples.
+
+    price = limit price as probability (0.01-0.99)
+    size  = number of outcome token shares available at that price
+
+    Sorted ascending by price so callers can walk from cheapest ask upward,
+    buying only levels where edge remains positive against the forecast prob.
+    Returns an empty list if the book has no asks or on any API failure.
+
+    Args:
+        token_id: outcome token ID
+        client:   optional pre-authenticated ClobClient (reuse across calls)
+
+    Returns:
+        List of (price, size) tuples sorted by price ascending.
+    """
+    try:
+        if client is None:
+            client = get_client()
+        book = client.get_order_book(token_id)
+        asks = book.asks or []
+        result = []
+        for ask in asks:
+            try:
+                result.append((float(ask.price), float(ask.size)))
+            except (AttributeError, ValueError, TypeError):
+                continue
+        return sorted(result, key=lambda x: x[0])
+    except Exception as e:
+        logger.warning(f"Could not fetch order book asks for {token_id}: {e}")
+        return []
 
 
 # -----------------------------------------------------------------------
@@ -571,13 +731,17 @@ def _extract_temp_bounds(text: str) -> dict | None:
 
     # Exact degree: "be X°C" or "be X°F" (Polymarket London format)
     # "Will the highest temperature in London be 12°C?" means bucket [12, 13)
-    m = re.search(r'(?:be\s+)(\d+(?:\.\d+)?)\s*°[fc]', t)
+    # Supports negative temps: "be -1°C" -> bucket [-1, 0)
+    # Must NOT match "be X°C or higher/lower" (those are caught above).
+    m = re.search(r'(?:be\s+)(-?\d+(?:\.\d+)?)\s*°[fc](?!\s+or\s)', t)
     if m:
         val = float(m.group(1))
         return {"low": val, "high": val + 1.0, "unit": unit}
 
-    # Standalone "X°F" fallback — anchor left side so we don't grab the second
+    # Standalone "X°F" fallback -- anchor left side so we don't grab the second
     # half of "88-89°f". This is the last resort.
+    # Note: this returns open-ended (low=X, high=None) because without
+    # "or higher/lower" context we cannot determine the bucket type.
     m = re.search(r'(?<!\d)(-?\d+(?:\.\d+)?)\s*°[fc]', t)
     if m:
         return {"low": float(m.group(1)), "high": None, "unit": unit}

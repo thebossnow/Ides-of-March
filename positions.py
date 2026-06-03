@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 # On VPS this will be ~/weatherbot/positions.db alongside the other bot files.
 DB_FILE = os.getenv(
     "POSITIONS_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "positions.db"),
+    str(Path(__file__).parent / "positions.db"),
 )
 
 # Thread-local storage for connections (SQLite connections are not thread-safe)
@@ -103,10 +104,32 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
     """)
 
+    # ------------------------------------------------------------------
+    # Migration: add columns for split/merge (CTF strategy) bookkeeping.
+    # Safe to re-run — IF NOT EXISTS guards via try/except on each ALTER.
+    # outcome:      'YES' or 'NO' (default 'YES' for legacy rows since the
+    #               sniper has historically only bought YES tokens).
+    # entry_method: 'buy' (CLOB FOK/GTC), 'split' (CTF.splitPosition),
+    #               'sweep' (FOK book sweep). Default 'buy' for legacy rows.
+    # ------------------------------------------------------------------
+    for ddl in (
+        "ALTER TABLE positions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'YES'",
+        "ALTER TABLE positions ADD COLUMN entry_method TEXT NOT NULL DEFAULT 'buy'",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
+
     # Indexes for common queries
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_positions_status
         ON positions(status)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_positions_condition_outcome
+        ON positions(condition_id, outcome, status)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_positions_token_id
@@ -143,10 +166,17 @@ def record_entry(
     forecast_prob: float = 0.0,
     market_prob: float = 0.0,
     edge: float = 0.0,
+    outcome: str = "YES",
+    entry_method: str = "buy",
 ) -> int:
     """
     Records a new position entry. Returns the row ID.
     Called immediately after a successful order placement.
+
+    outcome:      'YES' or 'NO'. Defaults to 'YES' for backward compatibility
+                  with all directional-buy callers.
+    entry_method: 'buy' | 'split' | 'sweep'. Tracks how the position was
+                  acquired (CLOB order vs CTF.splitPosition vs FOK book sweep).
     """
     conn = _get_conn()
     cursor = conn.execute(
@@ -156,8 +186,9 @@ def record_entry(
             bucket_low, bucket_high, unit,
             entry_price, shares, size_usdc, entry_time, order_id,
             status, neg_risk,
-            question, forecast_prob, market_prob, edge
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+            question, forecast_prob, market_prob, edge,
+            outcome, entry_method
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             token_id, condition_id, slug, city, market_date,
@@ -168,13 +199,16 @@ def record_entry(
             1 if neg_risk else 0,
             question[:500] if question else "",
             forecast_prob, market_prob, edge,
+            outcome.upper(),
+            entry_method.lower(),
         ),
     )
     conn.commit()
     row_id = cursor.lastrowid
     logger.info(
         f"Position recorded: id={row_id} | {city} {market_date} | "
-        f"{shares:.2f} shares @ {entry_price:.3f} = ${size_usdc:.2f}"
+        f"{outcome} {shares:.2f} shares @ {entry_price:.3f} = ${size_usdc:.2f} "
+        f"(method={entry_method})"
     )
     return row_id
 
@@ -313,6 +347,15 @@ def get_open_positions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_total_open_exposure() -> float:
+    """Returns total USDC exposure of all open positions."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(size_usdc), 0.0) as total FROM positions WHERE status = 'open'"
+    ).fetchone()
+    return float(row["total"] or 0.0)
+
+
 def get_open_positions_for_date(market_date: str) -> list[dict]:
     """Returns open positions for a specific market date."""
     conn = _get_conn()
@@ -392,6 +435,52 @@ def get_pnl_summary() -> dict:
         FROM positions
     """).fetchone()
     return dict(row)
+
+
+def get_mergeable_pairs(min_pair_size: float = 1.0) -> list[dict]:
+    """
+    Returns conditions where we hold both YES and NO open shares (a "complete
+    set"), with at least `min_pair_size` shares on each side. These pairs can
+    be merged back to USDC.e via ctf.merge_positions to free up collateral
+    without waiting for resolution.
+
+    Output rows:
+        condition_id, neg_risk, mergeable_shares, slug, city, market_date,
+        yes_shares, no_shares, yes_position_id, no_position_id
+
+    mergeable_shares = min(yes_shares, no_shares).
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        WITH yes_legs AS (
+            SELECT condition_id, neg_risk, slug, city, market_date,
+                   SUM(shares) AS yes_shares,
+                   MIN(id)     AS yes_position_id
+            FROM positions
+            WHERE status = 'open' AND outcome = 'YES' AND condition_id <> ''
+            GROUP BY condition_id
+        ),
+        no_legs AS (
+            SELECT condition_id,
+                   SUM(shares) AS no_shares,
+                   MIN(id)     AS no_position_id
+            FROM positions
+            WHERE status = 'open' AND outcome = 'NO' AND condition_id <> ''
+            GROUP BY condition_id
+        )
+        SELECT y.condition_id, y.neg_risk, y.slug, y.city, y.market_date,
+               y.yes_shares, n.no_shares,
+               y.yes_position_id, n.no_position_id,
+               MIN(y.yes_shares, n.no_shares) AS mergeable_shares
+        FROM yes_legs y
+        JOIN no_legs n USING (condition_id)
+        WHERE MIN(y.yes_shares, n.no_shares) >= ?
+        ORDER BY mergeable_shares DESC
+        """,
+        (min_pair_size,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_calibration_data() -> list[dict]:

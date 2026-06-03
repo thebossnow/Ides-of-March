@@ -101,12 +101,40 @@ def main():
 
     print()
     print("=" * 60)
-    print("USDC.e allowance set successfully.")
+    print("CLOB Exchange USDC.e allowance set.")
     print()
     print("NOTE: Conditional token (ERC-1155) allowances are set per-market")
     print("      automatically by the bot before each live order.")
+    print("=" * 60)
+
+    # ------------------------------------------------------------------
+    # Extra approvals required for CTF split/merge (sniper.py strategy)
+    # ------------------------------------------------------------------
+    # py-clob-client's update_balance_allowance() only authorizes the CLOB
+    # Exchange contract. splitPosition pulls USDC.e from the proxy via the
+    # CTF (or NegRiskAdapter) directly, which needs separate ERC-20 approvals.
+    # We submit both via the same Safe-relayer pattern used by redeemer.py.
     print()
-    print("Next step: python3 bot.py")
+    print("Setting CTF + NegRiskAdapter USDC.e allowances (for split/merge)...")
+    try:
+        from ctf import ensure_collateral_allowances, DRY_RUN as CTF_DRY_RUN
+        if CTF_DRY_RUN:
+            print("  CTF_DRY_RUN=true in env -> skipping live approvals.")
+            print("  Set CTF_DRY_RUN=false in .env, re-run, then flip back to true.")
+        else:
+            result = ensure_collateral_allowances()
+            print(f"  Approvals result: {result.get('status')}")
+            for spender, r in result.get("approvals", {}).items():
+                print(f"    {spender[:14]}...: {r.get('status')} "
+                      f"tx={r.get('transaction_hash', 'n/a')}")
+    except ImportError as e:
+        print(f"  Could not import ctf module: {e}")
+        print("  (run from sniperweatherbot/ so ctf.py is on the path)")
+    except Exception as e:
+        print(f"  CTF approvals failed: {e}")
+
+    print()
+    print("Next step: python3 bot.py  (or sniper.py)")
     print("=" * 60)
 
 

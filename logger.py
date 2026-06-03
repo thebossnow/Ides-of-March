@@ -9,8 +9,9 @@ import os
 import logging
 from datetime import datetime
 
-LOG_FILE  = "trade_log.csv"
-SCAN_FILE = "scan_log.csv"
+_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE  = os.path.join(_DIR, "trade_log.csv")
+SCAN_FILE = os.path.join(_DIR, "scan_log.csv")
 
 module_logger = logging.getLogger(__name__)
 
@@ -44,6 +45,12 @@ SCAN_HEADERS = [
     "edge",
     "decision",
     "reason",
+    "market_ask",
+    "max_bid",
+    "forecast_temp",
+    "market_unit",
+    "bucket_low",
+    "bucket_high",
 ]
 
 
@@ -115,6 +122,12 @@ def log_scan(
     edge: float,
     decision: str,
     reason: str = "",
+    market_ask: float = None,
+    max_bid: float = None,
+    forecast_temp: float = None,
+    market_unit: str = "",
+    bucket_low=None,
+    bucket_high=None,
 ) -> None:
     """Appends a scan decision record to scan_log.csv (every market checked)."""
     _ensure_headers(SCAN_FILE, SCAN_HEADERS)
@@ -129,6 +142,12 @@ def log_scan(
         round(edge, 4),
         decision,
         reason[:200],
+        round(market_ask, 4) if market_ask is not None else "",
+        round(max_bid, 4) if max_bid is not None else "",
+        round(forecast_temp, 2) if forecast_temp is not None else "",
+        market_unit or "",
+        bucket_low if bucket_low is not None else "",
+        bucket_high if bucket_high is not None else "",
     ]
 
     with open(SCAN_FILE, "a", newline="") as f:

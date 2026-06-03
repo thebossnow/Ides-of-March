@@ -247,6 +247,16 @@ def redeem_all_winners(notifier=None) -> dict:
             failed += 1
             continue
 
+        # Skip positions with no shares — nothing to redeem on-chain
+        shares = pos.get("shares", 0.0)
+        if not shares or shares < 0.001:
+            logger.info(
+                f"Position {pos['id']} ({pos['city']} {pos['market_date']}): "
+                f"shares={shares} — skipping redemption (no shares to redeem)"
+            )
+            failed += 1
+            continue
+
         result = redeem_position(
             condition_id=condition_id,
             neg_risk=bool(pos.get("neg_risk", 0)),
