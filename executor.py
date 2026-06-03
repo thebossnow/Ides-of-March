@@ -8,6 +8,7 @@ IMPORTANT: DRY_RUN = True until paper trading validates your edge.
 """
 
 import os
+import time
 import logging
 import concurrent.futures
 from dotenv import load_dotenv
@@ -33,10 +34,10 @@ SIG_TYPE  = int(os.getenv("POLYMARKET_SIG_TYPE", "2"))
 BUILDER_CODE = os.getenv("POLYMARKET_BUILDER_CODE", BYTES32_ZERO)
 
 # -----------------------------------------------------------------------
-# SAFETY FLAG - Change to False ONLY when ready for live trading
+# SAFETY FLAG - Controlled via .env: DRY_RUN=true to simulate, DRY_RUN=false for live.
 # -----------------------------------------------------------------------
 # LIVE TRADING ENABLED 2026-06-01 — Boss directive
-DRY_RUN = False
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +162,11 @@ def place_buy_order(token_id: str, price: float, size_usdc: float) -> dict:
     client = get_client()
     try:
         # Ensure conditional token allowance is set for this specific token.
-        # Must run before order submission; kept sequential (blockchain tx).
-        set_conditional_allowance(client, token_id)
+        # Uses module-level cache to skip redundant on-chain txs for tokens
+        # already approved this session (set by precache_token_metadata or prior orders).
+        if token_id not in _allowance_cache:
+            set_conditional_allowance(client, token_id)
+            _allowance_cache.add(token_id)
 
         # get_tick_size and get_neg_risk are independent read-only GET
         # requests. Fetch them in parallel to cut pre-order latency roughly
@@ -313,8 +317,10 @@ def place_sell_order(token_id: str, price: float, num_shares: float) -> dict:
             else:
                 return {"status": "REJECTED", "reason": "insufficient_token_balance"}
 
-        # Ensure allowance is set for selling this token
-        set_conditional_allowance(client, token_id)
+        # Ensure allowance is set for selling this token (cached if already approved)
+        if token_id not in _allowance_cache:
+            set_conditional_allowance(client, token_id)
+            _allowance_cache.add(token_id)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             fut_tick = pool.submit(client.get_tick_size, token_id)
@@ -453,8 +459,6 @@ def place_ladder_bids(
         }
 
     # Live ladder bidding
-    import time
-
     client = get_client()
     placed_orders = []
 
@@ -652,8 +656,6 @@ def place_gtc_order(
             "avg_price": price,
             "order_id": "DRY_RUN_GTC",
         }
-
-    import time
 
     client = get_client()
     order_id = ""
