@@ -243,7 +243,7 @@ def _heartbeat_loop() -> None:
     logger.info("Heartbeat thread started with empty ID (will be set by server)")
 
     consecutive_failures = 0
-    max_consecutive_failures = 10
+    max_consecutive_failures = 20  # Raised from 10 — normal restart causes 5-6 failures
     cloudflare_backoff = 0       # seconds, 0 = not in backoff
     cloudflare_max_backoff = 300  # 5 min cap
 
@@ -299,8 +299,9 @@ def _heartbeat_loop() -> None:
             # Try to extract server-provided heartbeat_id from error response
             # Error format: PolyApiException[..., error_message={'heartbeat_id': '...', 'error_msg': '...'}]
             try:
-                # PolyApiException exposes the response body via error_msg (dict)
-                # or error_message depending on SDK version — check both.
+                # Extract the server-provided heartbeat_id from the error response.
+                # The CLOB returns the current valid ID in the error body so we
+                # can resync on the next call.
                 hb_payload = None
                 if hasattr(e, 'error_msg') and isinstance(e.error_msg, dict):
                     hb_payload = e.error_msg
@@ -309,7 +310,7 @@ def _heartbeat_loop() -> None:
                 if hb_payload:
                     new_hb_id = hb_payload.get("heartbeat_id")
                     if new_hb_id:
-                        logger.info(f"Heartbeat: extracted ID from error response: {new_hb_id}")
+                        logger.debug(f"Heartbeat: resyncing ID from error response")
                         hb_id = new_hb_id
             except Exception as parse_err:
                 logger.debug(f"Heartbeat: could not parse error response: {parse_err}")
@@ -322,14 +323,15 @@ def _heartbeat_loop() -> None:
                 except Exception as auth_err:
                     logger.error(f"Heartbeat re-auth failed: {auth_err}")
 
-            # Alert if too many consecutive failures
+            # Log only — no Telegram alert for heartbeat failures.
+            # Heartbeat self-recovers within ~30s after restart; the cron watchdog
+            # handles true service outages. Alerting here causes spam on every restart.
             if consecutive_failures >= max_consecutive_failures:
-                notifier.notify_error(
-                    "Heartbeat",
-                    f"{consecutive_failures} consecutive heartbeat failures. "
-                    f"Last: {error_str}"
+                logger.error(
+                    f"Heartbeat: {consecutive_failures} consecutive failures — "
+                    f"still trying (last error: {error_str[:100]})"
                 )
-                consecutive_failures = 0  # Reset counter after alerting
+                consecutive_failures = 0  # Reset counter
 
         _heartbeat_stop.wait(5)
 
