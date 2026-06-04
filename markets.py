@@ -9,7 +9,8 @@ import re
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
-from py_clob_client_v2 import ClobClient
+from py_clob_client_v2 import ClobClient  # type hints only
+from executor import get_client  # Use singleton — avoids repeated auth derivation
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -105,23 +106,6 @@ CITY_ALIASES = {
 }
 
 
-def get_client() -> ClobClient:
-    """Creates and returns an authenticated CLOB client."""
-    pk     = os.getenv("POLYMARKET_PRIVATE_KEY")
-    funder = os.getenv("POLYMARKET_FUNDER")
-    if not pk or not funder:
-        raise EnvironmentError(
-            "POLYMARKET_PRIVATE_KEY and POLYMARKET_FUNDER must be set in .env"
-        )
-    client = ClobClient(
-        CLOB_HOST,
-        key=pk,
-        chain_id=CHAIN_ID,
-        signature_type=SIG_TYPE,  # Configurable: set POLYMARKET_SIG_TYPE in .env (default: 2)
-        funder=funder.lower().strip(),  # Normalize: lowercase + strip whitespace
-    )
-    client.set_api_creds(client.create_or_derive_api_key())
-    return client
 
 
 def get_weather_markets() -> list:
@@ -542,11 +526,11 @@ def get_midpoint_price(token_id: str, client: ClobClient = None) -> float | None
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
+        bids = book.get('bids', []) if isinstance(book, dict) else (book.bids or [])
+        asks = book.get('asks', []) if isinstance(book, dict) else (book.asks or [])
         if bids and asks:
-            best_bid = float(bids[0].price)
-            best_ask = float(asks[0].price)
+            best_bid = float(bids[0]['price'] if isinstance(bids[0], dict) else bids[0].price)
+            best_ask = float(asks[0]['price'] if isinstance(asks[0], dict) else asks[0].price)
             spread = best_ask - best_bid
             if spread > ILLIQUID_SPREAD:
                 logger.debug(
@@ -583,8 +567,8 @@ def is_book_illiquid(token_id: str, client: ClobClient = None) -> bool:
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        bids = book.bids or []
-        asks = book.asks or []
+        bids = book.get('bids', []) if isinstance(book, dict) else (book.bids or [])
+        asks = book.get('asks', []) if isinstance(book, dict) else (book.asks or [])
         if not bids or not asks:
             return True
         best_bid = float(bids[0].price)
@@ -616,11 +600,13 @@ def get_book_asks(token_id: str, client: ClobClient = None) -> list[tuple[float,
         if client is None:
             client = get_client()
         book = client.get_order_book(token_id)
-        asks = book.asks or []
+        asks = book.get('asks', []) if isinstance(book, dict) else (book.asks or [])
         result = []
         for ask in asks:
             try:
-                result.append((float(ask.price), float(ask.size)))
+                p = ask['price'] if isinstance(ask, dict) else ask.price
+                s = ask['size'] if isinstance(ask, dict) else ask.size
+                result.append((float(p), float(s)))
             except (AttributeError, ValueError, TypeError):
                 continue
         return sorted(result, key=lambda x: x[0])

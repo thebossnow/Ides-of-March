@@ -173,6 +173,7 @@ def record_entry(
     outcome: str = "YES",
     entry_method: str = "buy",
     market_type: str = "highest",
+    model_snapshot: str = None,  # diagnostic only — not stored in DB yet
 ) -> int:
     """
     Records a new position entry. Returns the row ID.
