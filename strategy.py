@@ -78,7 +78,7 @@ MIN_HOURS_TO_RES     = 2.0    # Skip markets resolving in < 2 hours
 # temperature is inherently uncertain. 85% on a single bucket is absurd.
 # Likewise, edge >50% means the model claims near-certainty — unrealistic
 # for any temperature forecast. These caps prevent snake-oil signals.
-MAX_FORECAST_PROB = 0.40       # Hard cap on model probability for any bucket
+MAX_FORECAST_PROB = 0.35       # Hard cap on model probability for any bucket (lowered from 0.40 — Phase 1)
 MAX_EDGE          = 0.50       # Hard cap on edge (prob - market_price)
 
 # -----------------------------------------------------------------------
@@ -251,30 +251,30 @@ UNRESOLVED_EXPOSURE_CAP = 0.50  # Max 50% of bankroll in unresolved positions
 # Phase 2 best-bucket selection + SOFT_MIN_PROB backstop provide the remaining
 # quality filter so loosening here doesn't open the floodgates.
 PROB_FLOOR_BY_HORIZON = {
-    0: 0.35,   # Same day (was 0.45)
-    1: 0.30,   # Tomorrow (was 0.38)
-    2: 0.32,
-    3: 0.28,
-    4: 0.25,
-    5: 0.22,
-    6: 0.20,
-    7: 0.18,
-    8: 0.16,
-    9: 0.15,
-    10: 0.14,
+    0: 0.38,   # Same day  (raised from 0.35 — Phase 1)
+    1: 0.35,   # Tomorrow  (raised from 0.30)
+    2: 0.35,   # 2-day     (raised from 0.32)
+    3: 0.32,   # 3-day     (raised from 0.28)
+    4: 0.28,   # 4-day     (raised from 0.25)
+    5: 0.25,   # 5-day     (raised from 0.22)
+    6: 0.22,   # 6-day     (raised from 0.20)
+    7: 0.20,   # 7-day     (raised from 0.18)
+    8: 0.18,   # 8-day     (raised from 0.16)
+    9: 0.16,   # 9-day     (raised from 0.15)
+    10: 0.15,  # 10-day    (raised from 0.14)
 }
-PROB_FLOOR_DEFAULT = 0.13  # Fallback for 11+ days (was 0.08)
+PROB_FLOOR_DEFAULT = 0.14  # Fallback for 11+ days (raised from 0.13)
 
 # Soft absolute floor applied in Phase 2 AFTER best-bucket selection.
 # Even the highest-prob bucket in a market must clear this or we skip the market
 # entirely. Acts as a backstop now that Phase 1 floors are more permissive.
-SOFT_MIN_PROB = 0.25
+SOFT_MIN_PROB = 0.30  # Raised from 0.25 — Phase 1
 
 # ── Absolute minimum probability floor (Boss directive 2026-05-18) ──────
 # No trade below 20% model probability, regardless of horizon or market type.
 # This is a hard floor that overrides all horizon-dependent floors.
 # Combined with MAX_FORECAST_PROB=0.40, the acceptable range is 20-40%.
-ABSOLUTE_MIN_PROB = 0.20
+ABSOLUTE_MIN_PROB = 0.30  # Raised from 0.20 — Phase 1 conservative floor
 # Daily minimum temperature forecasts have no historical calibration data
 # from our trading. Values are based on ECMWF verification literature
 # (2m min RMSE ~2-3K, similar to max) with a 1.2x safety factor.
@@ -378,6 +378,23 @@ CITY_SIGMA_MULTIPLIER = {
     "Mumbai":        1.0,   # (was 0.9)
     "Kolkata":       1.0,   # (was 0.9)
 }
+
+
+# -----------------------------------------------------------------------
+# WU forecast sigma horizon scaling — Phase 1 fix.
+# WU accuracy degrades with forecast lead time. Cities in WU_CITY_SIGMA_F
+# have a fixed same-day sigma; this table scales it up for future dates.
+# Applied inside wu_normal_probability() for both table and fallback cities.
+# Derived from WU MAE statistics (same-day ~2°C, 3-day ~3.5°C typical).
+# -----------------------------------------------------------------------
+WU_HORIZON_SCALE = {
+    0: 1.0,    # Same-day: table value as-is
+    1: 1.4,    # 1-day: 40% wider
+    2: 1.8,    # 2-day: 80% wider
+    3: 2.3,    # 3-day: 130% wider
+    4: 2.8,    # 4-day: 180% wider
+}
+WU_HORIZON_SCALE_DEFAULT = 3.0  # 5+ days: 200% wider
 
 # -----------------------------------------------------------------------
 # WU-specific per-city sigma (degrees F) for wu_normal_probability().
@@ -1278,8 +1295,18 @@ def wu_normal_probability(forecast_temp: float, bucket_low: float | None,
     Returns:
         probability float in [0.001, 0.999]
     """
+    # Compute horizon (days ahead) for sigma scaling
+    try:
+        from datetime import datetime as _dt, date as _date
+        _mdate = _dt.strptime(market_date, "%Y-%m-%d").date() if market_date else None
+        _days = max(0, (_mdate - _date.today()).days) if _mdate else 0
+    except Exception:
+        _days = 0
+    _horizon_scale = WU_HORIZON_SCALE.get(_days, WU_HORIZON_SCALE_DEFAULT)
+
     if city and city in WU_CITY_SIGMA_F:
-        sigma_f = WU_CITY_SIGMA_F[city]
+        # Table value is the same-day sigma — scale up for future horizons
+        sigma_f = WU_CITY_SIGMA_F[city] * _horizon_scale
     else:
         # Fallback: use _get_params (horizon-based) then double per Option A
         if market_date is not None:
@@ -1287,6 +1314,8 @@ def wu_normal_probability(forecast_temp: float, bucket_low: float | None,
         else:
             sigma_f = 5.5 if unit.upper() == "F" else 5.5 / 1.8
         sigma_f *= 2.0  # Option A: double WU sigma
+        # Apply horizon scale on top of doubling for additional conservatism
+        sigma_f *= _horizon_scale
 
     if unit.upper() == "C":
         sigma = sigma_f / 1.8
