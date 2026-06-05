@@ -55,18 +55,18 @@ MAX_LEAD_TIME_DAYS = 4  # Block all trades 5+ days out
 ENTRY_THRESHOLD = 0.15  # Default (1-day, kept for backward compat)
 
 ENTRY_THRESHOLD_BY_LEAD_TIME = {
-    0:  0.12,   # Same-day: lower bar (METAR bias correction + Bayesian live)
-    1:  0.15,   # Tomorrow: baseline
-    2:  0.20,   # 2 days: higher bar
-    3:  0.28,   # 3 days: much higher
-    4:  0.35,   # 4 days: demanding
+    0:  0.15,   # Same-day: raised from 0.12 — Phase 3 conservative
+    1:  0.20,   # Tomorrow: raised from 0.15
+    2:  0.25,   # 2 days: raised from 0.20
+    3:  0.30,   # 3 days: raised from 0.28
+    4:  0.38,   # 4 days: raised from 0.35
 }
 ENTRY_THRESHOLD_DEFAULT = 0.20  # Fallback for unknown horizons
 
 # -----------------------------------------------------------------------
 # Tunable parameters - adjust based on your paper-trading results
 # -----------------------------------------------------------------------
-ENTRY_THRESHOLD      = 0.15   # Lowered to 15% for more trade frequency & data collection
+ENTRY_THRESHOLD      = 0.15   # Default (1-day) — kept for backward compat; ENTRY_THRESHOLD_BY_LEAD_TIME is authoritative
 MAX_POSITION_USDC    = 12.0   # Hard cap per trade (was 25.0) - reduced for safety
 MIN_POSITION_USDC    = 3.0    # Minimum meaningful trade size
 KELLY_FRACTION       = 0.08   # Conservative fractional Kelly (was 0.18)
@@ -78,7 +78,7 @@ MIN_HOURS_TO_RES     = 2.0    # Skip markets resolving in < 2 hours
 # temperature is inherently uncertain. 85% on a single bucket is absurd.
 # Likewise, edge >50% means the model claims near-certainty — unrealistic
 # for any temperature forecast. These caps prevent snake-oil signals.
-MAX_FORECAST_PROB = 0.35       # Hard cap on model probability for any bucket (lowered from 0.40 — Phase 1)
+MAX_FORECAST_PROB = 0.65       # Sanity ceiling — Phase 1 sigma makes overconfidence impossible; honest ORHIGHER signals can legitimately hit 50-65%
 MAX_EDGE          = 0.50       # Hard cap on edge (prob - market_price)
 
 # -----------------------------------------------------------------------
@@ -273,7 +273,7 @@ SOFT_MIN_PROB = 0.30  # Raised from 0.25 — Phase 1
 # ── Absolute minimum probability floor (Boss directive 2026-05-18) ──────
 # No trade below 20% model probability, regardless of horizon or market type.
 # This is a hard floor that overrides all horizon-dependent floors.
-# Combined with MAX_FORECAST_PROB=0.40, the acceptable range is 20-40%.
+# Combined with MAX_FORECAST_PROB=0.65, honest ORHIGHER probs are allowed through.
 ABSOLUTE_MIN_PROB = 0.30  # Raised from 0.20 — Phase 1 conservative floor
 # Daily minimum temperature forecasts have no historical calibration data
 # from our trading. Values are based on ECMWF verification literature

@@ -606,7 +606,7 @@ def run_cycle() -> None:
         # Cap WU deterministic probability at a realistic maximum.
         # A single 1°C/2°F bucket should never exceed ~40% even with a
         # deterministic match — the market prices these at 2-15% for a reason.
-        WU_MAX_PROB = 0.40
+        WU_MAX_PROB = 0.65  # Phase 3: raised from 0.40 — honest ORHIGHER signals can legitimately exceed 40%
         if prob > WU_MAX_PROB:
             logger.info(
                 f"WU PROB CAP: {city} {date_str} raw={prob:.1%} → capped at {WU_MAX_PROB:.0%}"
