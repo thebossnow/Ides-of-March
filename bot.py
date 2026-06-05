@@ -528,11 +528,20 @@ def run_cycle() -> None:
         wu_result, wu_reason, wu_temp_c = wunderground_match(
             wu_city_data, date_str, market_type, bucket_low, bucket_high, unit=unit
         )
+        # Phase 2: when WU has forecast data for this city/date but this bucket
+        # isn't the point-match, compute probability anyway. Phase 2 grouping
+        # (below) picks the highest-prob bucket per (city, date) from all
+        # candidates. The corrected t-distribution sigma naturally assigns low
+        # probability to buckets far from the WU forecast.
+        _wu_direct_match = (wu_result == "TRADE")
         if wu_result == "SKIP":
-            log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP", f"WU: {wu_reason}",
-                     bucket_low=bucket_low, bucket_high=bucket_high)
-            continue
-        # WU says TRADE — deterministic match
+            if wu_temp_c is None:
+                # WU has no forecast at all for this date — skip entirely
+                log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP", f"WU: {wu_reason}",
+                         bucket_low=bucket_low, bucket_high=bucket_high)
+                continue
+            # WU has a forecast but this bucket isn't the point-match.
+            # Fall through to probability computation for Phase 2 selection.
         use_wunderground = True
 
         # ── WU ORHIGHER buffer guard (2026-05-26) ─────────────────────────
@@ -607,7 +616,10 @@ def run_cycle() -> None:
         forecast_in_unit = convert_forecast_to_market_unit(wu_temp_c, unit)
         ensemble_prob_val = None
         model_snapshot = None
-        logger.info(f"WU TRADE: {city} {date_str} | {wu_reason}")
+        if _wu_direct_match:
+            logger.info(f"WU TRADE: {city} {date_str} | {wu_reason}")
+        else:
+            logger.debug(f"WU P2 candidate: {city} {date_str} [{bucket_low}-{bucket_high}]{unit} (wu={wu_temp_c:.1f}C)")
 
         # Get weather forecast (cached per (city, market_type) per cycle).
         # Highest-temp markets use daily MAX; lowest-temp markets use daily MIN.
