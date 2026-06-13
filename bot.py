@@ -259,14 +259,14 @@ def _heartbeat_loop() -> None:
                     logger.debug(f"Heartbeat: updated ID {hb_id} -> {new_hb_id}")
                     hb_id = new_hb_id
 
-            consecutive_failures = 0  # Reset on success
+            if consecutive_failures > 0:
+                logger.info("Heartbeat: recovered after failures")
+            consecutive_failures = 0
 
         except Exception as e:
             consecutive_failures += 1
+            status_code = getattr(e, 'status_code', None)
             error_str = str(e)
-            logger.warning(
-                f"Heartbeat failed ({consecutive_failures}x): {error_str}"
-            )
 
             # Try to extract server-provided heartbeat_id from error response.
             # PolyApiException stores the response body in .error_msg (not .error_message).
@@ -274,29 +274,36 @@ def _heartbeat_loop() -> None:
                 err_body = getattr(e, 'error_msg', None)
                 if isinstance(err_body, dict):
                     new_hb_id = err_body.get("heartbeat_id")
-                    if new_hb_id:
-                        logger.info(f"Heartbeat: extracted ID from error response: {new_hb_id}")
+                    if new_hb_id and new_hb_id != hb_id:
+                        logger.debug(f"Heartbeat: using server-provided ID from error: {new_hb_id}")
                         hb_id = new_hb_id
-            except Exception as parse_err:
-                logger.debug(f"Heartbeat: could not parse error response: {parse_err}")
+            except Exception:
+                pass
 
-            # Re-auth the client on auth errors (check status_code attr or string repr)
-            status_code = getattr(e, 'status_code', None)
-            if status_code == 401 or "401" in error_str or "auth" in error_str.lower():
+            # Re-auth on 401
+            if status_code == 401 or "401" in error_str:
                 try:
                     client = _get_clob_client_safe()
                     logger.info("Heartbeat: re-authenticated client")
                 except Exception as auth_err:
                     logger.error(f"Heartbeat re-auth failed: {auth_err}")
 
-            # Alert if too many consecutive failures
-            if consecutive_failures >= max_consecutive_failures:
+            # Log at WARNING only for first failure; DEBUG after that.
+            # The REST heartbeat requires an active WebSocket session — repeated
+            # "Invalid Heartbeat ID" errors are expected in REST-only mode and
+            # do not affect FOK order execution.
+            if consecutive_failures == 1:
+                logger.warning(f"Heartbeat: first failure (REST-only mode expected): {error_str}")
+            elif consecutive_failures % 50 == 0:
+                logger.debug(f"Heartbeat: still failing ({consecutive_failures}x) — suppressed")
+
+            # Only Telegram-alert on auth failures, not the routine REST limitation
+            if consecutive_failures == max_consecutive_failures and status_code == 401:
                 notifier.notify_error(
                     "Heartbeat",
-                    f"{consecutive_failures} consecutive heartbeat failures. "
-                    f"Last: {error_str}"
+                    f"Auth failure after {consecutive_failures} attempts. Last: {error_str}"
                 )
-                consecutive_failures = 0  # Reset counter after alerting
+                consecutive_failures = 0
 
         _heartbeat_stop.wait(5)
 
