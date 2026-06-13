@@ -483,6 +483,20 @@ def run_cycle() -> None:
         forecast_in_unit = convert_forecast_to_market_unit(forecast_celsius, unit)
 
         # ---------------------------------------------------------------
+        # Forecast containment filter: only trade the bucket the forecast
+        # actually falls into. Tail buckets may have high edge due to market
+        # underpricing, but buying a bucket 2–3°C above the forecast is not
+        # a bet we're comfortable with regardless of apparent edge.
+        # ---------------------------------------------------------------
+        forecast_below_bucket = bucket_low is not None and forecast_in_unit < bucket_low
+        forecast_above_bucket = bucket_high is not None and forecast_in_unit >= bucket_high
+        if forecast_below_bucket or forecast_above_bucket:
+            log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP",
+                     f"forecast {forecast_in_unit:.1f} outside bucket "
+                     f"[{bucket_low},{bucket_high})")
+            continue
+
+        # ---------------------------------------------------------------
         # Ensemble spread: use per-forecast sigma when available.
         # Falls back to the static horizon table if ensemble API fails.
         # Cached per (city, date) to avoid redundant API calls.
