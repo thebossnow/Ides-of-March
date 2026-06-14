@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 ENTRY_THRESHOLD      = 0.15   # Only trade if forecast edge > 15%
 EXIT_THRESHOLD       = 0.05   # Exit/cancel if edge drops below 5%
 MAX_POSITION_USDC    = 25.0   # Hard cap: max USDC per single trade
-MIN_POSITION_USDC    = 5.0    # Minimum meaningful trade size
+MIN_POSITION_USDC    = 1.0    # Polymarket minimum order size
 KELLY_FRACTION       = 0.15   # 15% fractional Kelly (conservative)
 MIN_HOURS_TO_RES     = 2.0    # Skip markets resolving in < 2 hours
 # Dynamic probability floor by forecast horizon (days ahead).
