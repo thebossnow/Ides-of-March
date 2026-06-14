@@ -98,8 +98,7 @@ RESOLVED_CHECK_MINUTE = 5
 # -----------------------------------------------------------------------
 logging.basicConfig(
     handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler(),
+        logging.StreamHandler(),   # systemd captures stdout/stderr → bot.log
     ],
     level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s [%(module)s] %(message)s",
@@ -400,6 +399,22 @@ def run_cycle() -> None:
     trades_placed = 0
     total_spent = 0.0
     cycle_bankroll = get_current_bankroll()
+    # If bankroll fetch failed and returned the env-var fallback, compare against
+    # a hard cap to catch the $200 default inflating position sizes on a $10 account.
+    _fallback_cap = float(os.getenv("FALLBACK_BANKROLL", "200.0"))
+    if cycle_bankroll >= _fallback_cap and not DRY_RUN:
+        # Fetch succeeded at exactly the fallback value — could be real or a failed fetch.
+        # Re-attempt once more; if still at fallback, abort the cycle.
+        second_attempt = get_current_bankroll()
+        if second_attempt >= _fallback_cap:
+            msg = (f"Balance fetch returned fallback ${cycle_bankroll:.2f} twice. "
+                   f"Skipping cycle to avoid over-sizing. "
+                   f"Set FALLBACK_BANKROLL in .env to your actual balance.")
+            logger.error(msg)
+            notifier.notify_error("Bankroll", msg)
+            return
+        cycle_bankroll = second_attempt
+
     remaining_budget = _get_remaining_daily_budget(cycle_bankroll)
     if remaining_budget <= 0:
         logger.info("Daily spend limit already reached, skipping cycle.")
