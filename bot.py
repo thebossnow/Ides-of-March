@@ -186,8 +186,8 @@ def get_current_bankroll() -> float:
                 result = client.get_balance_allowance(params)
                 if isinstance(result, dict) and "balance" in result:
                     balance_usdc = int(result["balance"]) / 1_000_000
-                    if balance_usdc > 10:
-                        print(f"✅ Real bankroll loaded (sig_type={sig_type}): ${balance_usdc:.2f}")
+                    if balance_usdc >= 0:
+                        logger.info(f"Bankroll loaded (sig_type={sig_type}): ${balance_usdc:.2f}")
                         return round(balance_usdc, 2)
             except Exception as inner_e:
                 print(f"sig_type={sig_type} failed: {inner_e}")
