@@ -56,10 +56,19 @@ def _fetch_with_retry(url: str, params: dict) -> dict:
             logger.debug(f"Archive API attempt {attempt + 1} failed: {e}. Retry in {wait:.1f}s")
             time.sleep(wait)
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code < 500:
+            status = e.response.status_code if e.response is not None else None
+            if status is not None and status != 429 and status < 500:
                 raise
             last_exc = e
-            wait = BACKOFF_BASE_S * (2 ** attempt)
+            retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+            if retry_after is not None:
+                try:
+                    wait = float(retry_after)
+                except ValueError:
+                    wait = BACKOFF_BASE_S * (2 ** attempt)
+            else:
+                wait = BACKOFF_BASE_S * (2 ** attempt)
+            logger.debug(f"Open-Meteo rate limited (status={status}). Retry in {wait:.1f}s")
             time.sleep(wait)
 
     raise requests.exceptions.ConnectionError(

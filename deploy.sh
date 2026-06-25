@@ -40,8 +40,24 @@ python3 -c "import requests; print('  requests: OK')"
 python3 -c "import schedule; print('  schedule: OK')"
 python3 -c "import web3; print('  web3: OK')"
 
-# 6. Verify .env
-echo "[6/7] Checking credentials..."
+# 6. Logrotate for bot.log (prevents unbounded disk growth)
+echo "[6/8] Configuring logrotate for bot.log..."
+BOT_DIR="$(pwd)"
+sudo tee /etc/logrotate.d/ides-of-march > /dev/null <<EOF
+${BOT_DIR}/bot.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+echo "  /etc/logrotate.d/ides-of-march installed for ${BOT_DIR}/bot.log"
+
+# 7. Verify .env
+echo "[7/8] Checking credentials..."
 if [ ! -f ".env" ]; then
     echo ""
     echo "  .env not found. Creating it now..."
@@ -60,8 +76,8 @@ else
     echo "  .env found. Permissions set to 600."
 fi
 
-# 7. Import test
-echo "[7/7] Running import test..."
+# 8. Import test
+echo "[8/8] Running import test..."
 python3 -c "
 from weather_v2 import get_forecast, CITIES
 from wunderground_client import WundergroundClient
