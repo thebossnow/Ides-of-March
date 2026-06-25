@@ -32,6 +32,7 @@ import time
 import threading
 import logging
 import os
+import signal
 import uuid
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -1615,6 +1616,13 @@ def _send_daily_report() -> None:
 # Main entry point
 # -----------------------------------------------------------------------
 def main() -> None:
+    # Ignore SIGHUP so the bot survives logrotate, systemd restart sequences,
+    # terminal/screen detach, or a stray `kill -HUP`. Guarded because SIGHUP
+    # does not exist on all platforms (e.g. Windows).
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        logger.info("SIGHUP ignored (logrotate/detach-safe)")
+
     logger.info("=" * 60)
     logger.info("Polymarket Weather Bot starting")
     mode_str = "DRY RUN (paper trading)" if DRY_RUN else "*** LIVE TRADING ***"
