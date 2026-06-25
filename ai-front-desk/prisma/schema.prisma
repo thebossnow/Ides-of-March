@@ -1,0 +1,228 @@
+// Multi-tenant data model for the AI front desk.
+// See docs/02-build-plan.md §3. pgvector is used for per-tenant RAG (KnowledgeChunk.embedding).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+enum Tier {
+  FOUNDATION
+  ACTIVE
+  INTELLIGENT
+}
+
+enum Channel {
+  WEB
+  WHATSAPP
+  EMAIL
+  SMS
+}
+
+enum LeadStatus {
+  NEW
+  QUALIFYING
+  QUALIFIED
+  BOOKED
+  LOST
+}
+
+enum OnboardingStage {
+  DISCOVERY
+  PLANNING
+  BUILD
+  REVIEW
+  LIVE
+}
+
+model Agency {
+  id        String   @id @default(cuid())
+  name      String
+  tenants   Tenant[]
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model Tenant {
+  id            String          @id @default(cuid())
+  agency        Agency          @relation(fields: [agencyId], references: [id])
+  agencyId      String
+  name          String
+  vertical      String // aesthetics, real_estate, education, home_services, gym, coaching, insurance
+  tier          Tier            @default(FOUNDATION)
+  timezone      String          @default("Asia/Singapore")
+  businessHours Json? // weekly open/close windows
+  featureFlags  Json? // derived from tier; per-tenant overrides
+  channels      Json? // enabled channels + per-channel config
+  stage         OnboardingStage @default(DISCOVERY)
+
+  knowledgeDocs KnowledgeDoc[]
+  conversations Conversation[]
+  leads         Lead[]
+  baseline      Baseline?
+  metrics       MetricSnapshot[]
+  reports       MonthlyReport[]
+  users         User[]
+  createdAt     DateTime        @default(now())
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("agency_staff") // agency_staff | client_owner | client_staff
+  agency    Agency?  @relation(fields: [agencyId], references: [id])
+  agencyId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id])
+  tenantId  String?
+  createdAt DateTime @default(now())
+}
+
+model KnowledgeDoc {
+  id        String           @id @default(cuid())
+  tenant    Tenant           @relation(fields: [tenantId], references: [id])
+  tenantId  String
+  title     String
+  source    String // services | pricing | faq | policy
+  chunks    KnowledgeChunk[]
+  createdAt DateTime         @default(now())
+}
+
+model KnowledgeChunk {
+  id        String                      @id @default(cuid())
+  doc       KnowledgeDoc                @relation(fields: [docId], references: [id])
+  docId     String
+  content   String
+  embedding Unsupported("vector(1536)")?
+}
+
+model Conversation {
+  id         String    @id @default(cuid())
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  tenantId   String
+  channel    Channel
+  visitorRef String // web session id or WhatsApp phone
+  handedOff  Boolean   @default(false)
+  messages   Message[]
+  lead       Lead?     @relation(fields: [leadId], references: [id])
+  leadId     String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([tenantId, visitorRef])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  conversationId String
+  role           String // user | assistant | system | tool
+  content        Json // text or content blocks
+  createdAt      DateTime     @default(now())
+}
+
+model Lead {
+  id           String         @id @default(cuid())
+  tenant       Tenant         @relation(fields: [tenantId], references: [id])
+  tenantId     String
+  status       LeadStatus     @default(NEW)
+  source       Channel
+  contact      Json? // name, phone, email
+  service      String?
+  preferredAt  DateTime?
+  budget       String?
+  location     String?
+  requirements String?
+  score        Int            @default(0)
+  conversations Conversation[]
+  booking      Booking?
+  followUps    ScheduledMessage[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([tenantId, status])
+}
+
+model Booking {
+  id        String   @id @default(cuid())
+  lead      Lead     @relation(fields: [leadId], references: [id])
+  leadId    String   @unique
+  calEventId String?
+  slot      DateTime
+  status    String   @default("confirmed") // confirmed | cancelled | no_show | completed
+  createdAt DateTime @default(now())
+}
+
+model ScheduledMessage {
+  id        String   @id @default(cuid())
+  lead      Lead     @relation(fields: [leadId], references: [id])
+  leadId    String
+  channel   Channel
+  template  String
+  sendAt    DateTime
+  sentAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([sendAt, sentAt])
+}
+
+model UnansweredQuestion {
+  id        String   @id @default(cuid())
+  tenantId  String
+  question  String
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+model Baseline {
+  id        String   @id @default(cuid())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId  String   @unique
+  // The 5 tracked metrics, fixed before go-live.
+  enquiriesPerWeek      Float?
+  leadToCallRate        Float?
+  bookingConversionRate Float?
+  avgResponseMinutes    Float?
+  pctAutoHandled        Float?
+  noShowRate            Float?
+  googleReviewCount     Int?
+  googleRating          Float?
+  capturedAt DateTime @default(now())
+}
+
+model MetricSnapshot {
+  id        String   @id @default(cuid())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId  String
+  periodStart DateTime
+  periodEnd   DateTime
+  enquiriesPerWeek      Float?
+  leadToCallRate        Float?
+  bookingConversionRate Float?
+  avgResponseMinutes    Float?
+  pctAutoHandled        Float?
+  noShowRate            Float?
+  googleReviewCount     Int?
+  googleRating          Float?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, periodStart])
+}
+
+model MonthlyReport {
+  id        String   @id @default(cuid())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId  String
+  month     String // YYYY-MM
+  data      Json // baseline vs current + insights
+  pdfUrl    String?
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, month])
+}
