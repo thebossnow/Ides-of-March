@@ -10,5 +10,6 @@ scipy
 pandas
 python-telegram-bot>=21.0
 py-builder-relayer-client>=0.0.1
+py_builder_signing_sdk>=0.0.2
 eth-abi>=5.0.0
 pytz>=2024.1

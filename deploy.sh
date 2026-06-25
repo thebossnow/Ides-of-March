@@ -63,13 +63,21 @@ fi
 # 7. Import test
 echo "[7/7] Running import test..."
 python3 -c "
-from weather import get_forecast
+from weather_v2 import get_forecast, CITIES
+from wunderground_client import WundergroundClient
+from aviation_weather import fetch_metar
+from metar_bias import METARBiasCorrector
+from metar_block import is_metar_blocked
+from risk_manager_v2 import RiskManager
+from wu_empirical import WUEmpiricalModel
 from markets import get_weather_markets
 from strategy import forecast_probability, kelly_position_size
 from executor import DRY_RUN
 from logger import log_scan
+from rate_limiter import aviation_limiter
 print('  All modules import successfully')
 print(f'  DRY_RUN = {DRY_RUN}')
+print(f'  Cities configured: {len(CITIES)}')
 "
 
 echo ""
@@ -80,7 +88,7 @@ echo "  source venv/bin/activate"
 echo "  python3 set_allowances.py"
 echo ""
 echo "Then test each module:"
-echo "  python3 weather.py        # Test Open-Meteo API"
+echo "  python3 weather_v2.py     # Test Open-Meteo API"
 echo "  python3 markets.py        # Test market discovery"
 echo ""
 echo "Start bot in paper trading mode:"
