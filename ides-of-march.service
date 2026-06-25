@@ -1,0 +1,24 @@
+[Unit]
+Description=Ides-of-March Polymarket weather trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Ides-of-March
+# load_dotenv() in the import chain reads .env from WorkingDirectory
+ExecStart=/root/Ides-of-March/venv/bin/python3 /root/Ides-of-March/bot.py
+Restart=always
+RestartSec=10
+# Don't thrash on a hard config error (e.g. missing TELEGRAM_TOKEN):
+# if it dies 5 times within 120s, stop trying and surface the failure.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StandardOutput=append:/root/Ides-of-March/bot.log
+StandardError=append:/root/Ides-of-March/bot.log
+# Single instance only — systemd tracks the main PID, no stray duplicates
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

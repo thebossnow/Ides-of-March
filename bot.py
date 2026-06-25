@@ -146,7 +146,7 @@ RESOLVED_CHECK_MINUTE = 5
 # -----------------------------------------------------------------------
 logging.basicConfig(
     handlers=[
-        logging.FileHandler("bot.log"),
+        logging.StreamHandler(),   # systemd captures stdout/stderr → bot.log
     ],
     level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s [%(module)s] %(message)s",
@@ -409,6 +409,23 @@ def run_cycle() -> None:
     trades_placed = 0
     total_spent = 0.0
     cycle_bankroll = get_current_bankroll()
+    # Balance-fetch safety: if the live fetch failed and fell back to the
+    # FALLBACK_BANKROLL default, sizing Kelly bets against an inflated bankroll
+    # can blow up a small account (e.g. a $10 balance sized as $200). If the
+    # fetch returns the fallback value, retry once; if still at the fallback,
+    # abort the cycle rather than over-size. Set FALLBACK_BANKROLL in .env to
+    # your actual balance as a stopgap while diagnosing the live fetch.
+    _fallback_cap = float(os.getenv("FALLBACK_BANKROLL", "200.0"))
+    if cycle_bankroll >= _fallback_cap and not DRY_RUN:
+        second_attempt = get_current_bankroll()
+        if second_attempt >= _fallback_cap:
+            msg = (f"Balance fetch returned fallback ${cycle_bankroll:.2f} twice. "
+                   f"Skipping cycle to avoid over-sizing. "
+                   f"Set FALLBACK_BANKROLL in .env to your actual balance.")
+            logger.error(msg)
+            notifier.notify_error("Bankroll", msg)
+            return
+        cycle_bankroll = second_attempt
     MAX_DAILY_SPEND = cycle_bankroll * 0.5
 
     # Phase 0: Pre-fetch METAR observations for Bayesian same-day updates
@@ -665,6 +682,22 @@ def run_cycle() -> None:
 
             forecast_celsius = forecast_data[date_str]
             forecast_in_unit = convert_forecast_to_market_unit(forecast_celsius, unit)
+
+        # ---------------------------------------------------------------
+        # Forecast containment filter: only trade the bucket the forecast
+        # actually falls into. Tail buckets may show high edge from market
+        # underpricing, but buying a bucket above/below the forecast is not a
+        # bet we want regardless of apparent edge. Applies to both the WU and
+        # Open-Meteo paths (forecast_in_unit is set in both by this point).
+        # ---------------------------------------------------------------
+        forecast_below_bucket = bucket_low is not None and forecast_in_unit < bucket_low
+        forecast_above_bucket = bucket_high is not None and forecast_in_unit >= bucket_high
+        if forecast_below_bucket or forecast_above_bucket:
+            log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP",
+                     f"forecast {forecast_in_unit:.1f} outside bucket "
+                     f"[{bucket_low},{bucket_high})",
+                     bucket_low=bucket_low, bucket_high=bucket_high)
+            continue
 
         # ── GFS Ensemble Stability Check ───────────────────────────────
         if not use_wunderground:
