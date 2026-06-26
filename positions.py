@@ -173,19 +173,41 @@ def record_entry(
     outcome: str = "YES",
     entry_method: str = "buy",
     market_type: str = "highest",
-    model_snapshot: str = None,  # diagnostic only — not stored in DB yet
+    model_snapshot: str = None,
+    ensemble_prob: float = None,
+    wu_source: bool = False,
+    wu_forecast_c: float = None,
+    forecast_temp_c: float = None,
+    **extra,  # forward-compat: tolerate unknown kwargs so a callsite mismatch
+              # never silently drops a trade record again. Logged at debug.
 ) -> int:
     """
     Records a new position entry. Returns the row ID.
     Called immediately after a successful order placement.
 
-    outcome:      'YES' or 'NO'. Defaults to 'YES' for backward compatibility
-                  with all directional-buy callers.
-    entry_method: 'buy' | 'split' | 'sweep'. Tracks how the position was
-                  acquired (CLOB order vs CTF.splitPosition vs FOK book sweep).
-    market_type:  'highest' (daily MAX) or 'lowest' (daily MIN). Critical for
-                  correct resolution — lowest markets must resolve against MIN temp.
+    outcome:        'YES' or 'NO'. Defaults to 'YES' for backward compatibility
+                    with all directional-buy callers.
+    entry_method:   'buy' | 'split' | 'sweep' | 'fok' | 'gtc'. Tracks how the
+                    position was acquired.
+    market_type:    'highest' (daily MAX) or 'lowest' (daily MIN). Critical for
+                    correct resolution — lowest markets must resolve against MIN temp.
+    model_snapshot: JSON string of the ensemble snapshot at entry, for replay.
+    ensemble_prob:  Ensemble probability (separate from forecast_prob, which is
+                    the combined/top-of-stack probability used for the decision).
+    wu_source:      True if the trade was driven by the Wunderground pathway.
+    wu_forecast_c:  WU forecast in Celsius (only when wu_source=True).
+    forecast_temp_c: Forecast temperature in Celsius that drove the decision
+                    (always populated — for WU trades this equals wu_forecast_c;
+                    for ensemble trades it's the ensemble top-2 mean).
+    **extra:        Tolerated for forward-compat. Bug fixed 2026-06-08: a
+                    signature mismatch was silently catching trades in bot.py's
+                    try/except, leaving on-chain positions with no DB row.
     """
+    if extra:
+        logger.warning(
+            f"record_entry: unknown kwargs ignored: {list(extra.keys())} "
+            f"(slug={slug[:40]}). Consider adding columns if persistent."
+        )
     conn = _get_conn()
     cursor = conn.execute(
         """
@@ -195,8 +217,10 @@ def record_entry(
             entry_price, shares, size_usdc, entry_time, order_id,
             status, neg_risk,
             question, forecast_prob, market_prob, edge,
-            outcome, entry_method, market_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
+            outcome, entry_method, market_type,
+            model_snapshot, ensemble_prob,
+            wu_source, wu_forecast_c, forecast_temp_c
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             token_id, condition_id, slug, city, market_date,
@@ -210,6 +234,9 @@ def record_entry(
             outcome.upper(),
             entry_method.lower(),
             market_type.lower(),
+            model_snapshot, ensemble_prob,
+            1 if wu_source else 0,
+            wu_forecast_c, forecast_temp_c,
         ),
     )
     conn.commit()

@@ -545,28 +545,33 @@ def run_cycle() -> None:
             # Fall through to probability computation for Phase 2 selection.
         use_wunderground = True
 
-        # ── WU ORHIGHER buffer guard (2026-05-26) ─────────────────────────
-        # For ORHIGHER markets, any symmetric model returns ~50% when the WU
-        # forecast is exactly at the threshold — and ~40% (the cap) when it's
-        # within a few degrees. Markets correctly price these at 2-8¢.
-        # Require WU to be at least WU_ORHIGHER_MIN_BUFFER_F above threshold.
-        # Same guard applied to ORBELOW (lowest-temp) in the opposite direction.
-        WU_ORHIGHER_MIN_BUFFER_F = 5.0  # ~2.8°C; tunable once WU calibration exists
-        if bucket_high is None and bucket_low is not None and market_type == "highest":
+        # ── WU open-ended buffer guard ─────────────────────────────────────
+        # For open-ended buckets, the WU 2× sigma stacking inflates probability
+        # when the forecast is on the adverse side (e.g. forecast=14°C for a
+        # [None,9°C] bucket), producing phantom FOK edge.
+        # Require the WU forecast to be at least WU_MIN_BUFFER_F inside the
+        # bucket boundary — regardless of market_type (highest or lowest).
+        # Bug fixed 2026-06-08: previous ORBELOW guard was gated on
+        # market_type=="lowest" so it never fired for "highest" markets with
+        # [None,H] buckets (Munich, Moscow, Wellington, HK observed losses).
+        WU_MIN_BUFFER_F = 5.0  # ~2.8°C; forecast must be this far inside the boundary
+        if bucket_high is None and bucket_low is not None:
+            # ORHIGHER: forecast must be >= bucket_low + buffer
             _bl_c = (bucket_low - 32.0) / 1.8 if unit.upper() == "F" else bucket_low
             _gap_f = (wu_temp_c - _bl_c) * 1.8
-            if _gap_f < WU_ORHIGHER_MIN_BUFFER_F:
+            if _gap_f < WU_MIN_BUFFER_F:
                 log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP",
-                         f"WU: ORHIGHER gap {_gap_f:+.1f}°F < {WU_ORHIGHER_MIN_BUFFER_F}°F required",
+                         f"WU: ORHIGHER gap {_gap_f:+.1f}°F < {WU_MIN_BUFFER_F}°F required",
                          bucket_low=bucket_low, bucket_high=bucket_high)
                 use_wunderground = False
                 continue
-        if bucket_low is None and bucket_high is not None and market_type == "lowest":
+        if bucket_low is None and bucket_high is not None:
+            # ORBELOW: forecast must be <= bucket_high - buffer (any market_type)
             _bh_c = (bucket_high - 32.0) / 1.8 if unit.upper() == "F" else bucket_high
             _gap_f = (_bh_c - wu_temp_c) * 1.8
-            if _gap_f < WU_ORHIGHER_MIN_BUFFER_F:
+            if _gap_f < WU_MIN_BUFFER_F:
                 log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP",
-                         f"WU: ORBELOW gap {_gap_f:+.1f}°F < {WU_ORHIGHER_MIN_BUFFER_F}°F required",
+                         f"WU: ORBELOW gap {_gap_f:+.1f}°F < {WU_MIN_BUFFER_F}°F required",
                          bucket_low=bucket_low, bucket_high=bucket_high)
                 use_wunderground = False
                 continue
@@ -1436,11 +1441,13 @@ def run_cycle() -> None:
                     forecast_prob=sig["prob"],
                     market_prob=actual_price,
                     edge=sig["edge"],
+                    entry_method=exec_label.lower(),
                     model_snapshot=sig.get("model_snapshot"),
                     ensemble_prob=sig.get("ensemble_prob"),
                     market_type=sig.get("market_type", "highest"),
                     wu_source=sig.get("wu_source", False),
-                    wu_forecast_c=sig.get("forecast_celsius"),
+                    wu_forecast_c=(sig.get("forecast_celsius") if sig.get("wu_source") else None),
+                    forecast_temp_c=sig.get("forecast_celsius"),
                 )
             except Exception as e:
                 logger.error(f"Failed to record illiquid position in DB: {e}")
@@ -1552,11 +1559,13 @@ def run_cycle() -> None:
                     forecast_prob=sig["prob"],
                     market_prob=actual_price,
                     edge=sig["edge"],
+                    entry_method=exec_label.lower(),
                     model_snapshot=sig.get("model_snapshot"),
                     ensemble_prob=sig.get("ensemble_prob"),
                     market_type=sig.get("market_type", "highest"),
                     wu_source=sig.get("wu_source", False),
-                    wu_forecast_c=sig.get("forecast_celsius"),
+                    wu_forecast_c=(sig.get("forecast_celsius") if sig.get("wu_source") else None),
+                    forecast_temp_c=sig.get("forecast_celsius"),
                 )
             except Exception as e:
                 logger.error(f"Failed to record position in DB: {e}")
@@ -1616,9 +1625,13 @@ def _send_daily_report() -> None:
 # Main entry point
 # -----------------------------------------------------------------------
 def main() -> None:
-    # Ignore SIGHUP so the bot survives logrotate, systemd restart sequences,
-    # terminal/screen detach, or a stray `kill -HUP`. Guarded because SIGHUP
-    # does not exist on all platforms (e.g. Windows).
+    # Ignore SIGHUP so logrotate (or any future cron) can't kill us.
+    # Fixed 2026-06-11: /etc/logrotate.d/weatherbot had `postrotate {
+    # systemctl kill -s HUP weatherbot.service }`, and Python's default
+    # SIGHUP handler is to terminate. logrotate now uses copytruncate,
+    # but this is belt-and-suspenders — if any future config change
+    # re-introduces a SIGHUP, we ignore it instead of dying.
+    # hasattr guard for portability (SIGHUP is not defined on Windows).
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         logger.info("SIGHUP ignored (logrotate/detach-safe)")

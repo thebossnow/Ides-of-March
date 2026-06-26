@@ -67,8 +67,17 @@ ENTRY_THRESHOLD_DEFAULT = 0.20  # Fallback for unknown horizons
 # Tunable parameters - adjust based on your paper-trading results
 # -----------------------------------------------------------------------
 ENTRY_THRESHOLD      = 0.15   # Default (1-day) — kept for backward compat; ENTRY_THRESHOLD_BY_LEAD_TIME is authoritative
-MAX_POSITION_USDC    = 12.0   # Hard cap per trade (was 25.0) - reduced for safety
-MIN_POSITION_USDC    = 3.0    # Minimum meaningful trade size
+MAX_POSITION_USDC    = 2.0    # Reduced 2026-06-08: prioritize sample size over per-trade EV.
+                              # Rationale (per session notes): cohort win rates are unstable on
+                              # short windows (walk-forward Δ ±30%); Kelly sizing on biased
+                              # probabilities is dangerous (Thorp); $2/trade gives 6× more
+                              # data points per bankroll dollar for calibration convergence.
+                              # FOK sweep path was already hardcoded to $2 (bot.py:855,875);
+                              # this aligns the Kelly/GTC path with that ceiling.
+MIN_POSITION_USDC    = 1.0    # Polymarket CLOB minimum order size.
+                              # (Was 3.0; lowered to permit Kelly to size down to $1 when edge
+                              # is weak. Without this, the clamp max(MIN, min(MAX, x)) would
+                              # force everything to MIN when MIN > MAX.)
 KELLY_FRACTION       = 0.08   # Conservative fractional Kelly (was 0.18)
 MIN_HOURS_TO_RES     = 2.0    # Skip markets resolving in < 2 hours
 
@@ -80,6 +89,13 @@ MIN_HOURS_TO_RES     = 2.0    # Skip markets resolving in < 2 hours
 # for any temperature forecast. These caps prevent snake-oil signals.
 MAX_FORECAST_PROB = 0.65       # Sanity ceiling — Phase 1 sigma makes overconfidence impossible; honest ORHIGHER signals can legitimately hit 50-65%
 MAX_EDGE          = 0.50       # Hard cap on edge (prob - market_price)
+
+# Hard cap applied when the point forecast is on the adverse side of an
+# open-ended bucket — i.e. the model is betting against its own forecast.
+# Calibration (2026-06-08, 97 resolved trades) shows these yield <5% wins;
+# the WU 2× sigma stacking inflates them to 34-35%, creating phantom FOK edge.
+# Cap at 10% so no open-ended adverse bet qualifies under the 15% edge floor.
+OPEN_ENDED_ADVERSE_PROB_CAP = 0.10
 
 # -----------------------------------------------------------------------
 # Blocked cities — markets with poor bucket coverage (backtest-verified)
@@ -670,6 +686,16 @@ def forecast_probability(forecast_temp: float, bucket_low: float | None,
     high_p = t_dist.cdf(bucket_high, df, loc=mu, scale=sigma) if bucket_high is not None else 1.0
 
     prob = high_p - low_p
+
+    # Open-ended adverse cap: when the point forecast is on the wrong side of
+    # an open-ended bucket boundary, sigma inflation can push prob to 30-35%
+    # even though the forecast is 5°C into enemy territory.  Cap at
+    # OPEN_ENDED_ADVERSE_PROB_CAP so no fake edge passes the entry floor.
+    if bucket_low is None and bucket_high is not None and mu > bucket_high:
+        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
+    elif bucket_high is None and bucket_low is not None and mu < bucket_low:
+        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
+
     # Clamp to valid probability range
     return max(0.001, min(0.999, prob))
 

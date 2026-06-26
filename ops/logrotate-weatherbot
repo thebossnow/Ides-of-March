@@ -1,0 +1,24 @@
+# Fixed 2026-06-11: postrotate `systemctl kill -s HUP weatherbot.service` was
+# killing the bot at midnight UTC. Python's default SIGHUP handler is to exit,
+# and bot.py has no custom handler, so logrotate has been assassinating the bot
+# daily. copytruncate keeps the bot's file handle valid through rotation.
+/root/weatherbot/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    copytruncate
+}
+
+/root/weatherbot/*.csv {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+    copytruncate
+}

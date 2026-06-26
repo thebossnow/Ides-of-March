@@ -9,3 +9,10 @@ venv/
 *.db-journal
 *.tmp
 VPS files/
+
+# Generated outputs from calibration / backups (added 2026-06-08)
+calibration_history/
+backups/
+*.bak.*
+*.bak
+logs/calibration_weekly_*.log

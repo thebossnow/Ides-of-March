@@ -1,0 +1,23 @@
+[Unit]
+Description=Polymarket Weather Trading Bot (Raijin Managed)
+After=network.target
+Wants=weatherbot-dashboard.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/weatherbot
+EnvironmentFile=/root/weatherbot/.env
+ExecStart=/root/weatherbot/venv/bin/python3 /root/weatherbot/bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/weatherbot/bot.log
+StandardError=append:/root/weatherbot/bot.log
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/root/weathercore
+Environment=STATION_COORDS=1
+Nice=10
+CPUSchedulingPolicy=idle
+
+[Install]
+WantedBy=multi-user.target
