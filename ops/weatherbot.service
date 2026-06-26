@@ -1,23 +1,23 @@
 [Unit]
-Description=Polymarket Weather Trading Bot (Raijin Managed)
-After=network.target
-Wants=weatherbot-dashboard.service
+Description=Ides-of-March Polymarket weather trading bot
+After=network-online.target
+Wants=network-online.target
+# Stop restarting after 5 failures in 120s (surfaces hard config errors)
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/weatherbot
-EnvironmentFile=/root/weatherbot/.env
-ExecStart=/root/weatherbot/venv/bin/python3 /root/weatherbot/bot.py
+WorkingDirectory=/root/Ides-of-March
+# load_dotenv() in the import chain reads .env from WorkingDirectory
+ExecStart=/root/Ides-of-March/venv/bin/python3 /root/Ides-of-March/bot.py
 Restart=always
 RestartSec=10
-StandardOutput=append:/root/weatherbot/bot.log
-StandardError=append:/root/weatherbot/bot.log
-Environment=PYTHONUNBUFFERED=1
-Environment=PYTHONPATH=/root/weathercore
-Environment=STATION_COORDS=1
-Nice=10
-CPUSchedulingPolicy=idle
+StandardOutput=append:/root/Ides-of-March/bot.log
+StandardError=append:/root/Ides-of-March/bot.log
+# Single instance only — systemd tracks the main PID, no stray duplicates
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target
