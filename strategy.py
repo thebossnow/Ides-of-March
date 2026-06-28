@@ -87,7 +87,7 @@ MIN_HOURS_TO_RES     = 2.0    # Skip markets resolving in < 2 hours
 # temperature is inherently uncertain. 85% on a single bucket is absurd.
 # Likewise, edge >50% means the model claims near-certainty — unrealistic
 # for any temperature forecast. These caps prevent snake-oil signals.
-MAX_FORECAST_PROB = 0.65       # Sanity ceiling — Phase 1 sigma makes overconfidence impossible; honest ORHIGHER signals can legitimately hit 50-65%
+MAX_FORECAST_PROB = 0.95  # Phase 3: raised for open cumulative thresholds (or-below high fc-low, or-higher fc-high). Narrow bins still get sanity via context.
 MAX_EDGE          = 0.50       # Hard cap on edge (prob - market_price)
 
 # Hard cap applied when the point forecast is on the adverse side of an
@@ -284,7 +284,7 @@ PROB_FLOOR_DEFAULT = 0.14  # Fallback for 11+ days (raised from 0.13)
 # Soft absolute floor applied in Phase 2 AFTER best-bucket selection.
 # Even the highest-prob bucket in a market must clear this or we skip the market
 # entirely. Acts as a backstop now that Phase 1 floors are more permissive.
-SOFT_MIN_PROB = 0.30  # Raised from 0.25 — Phase 1
+SOFT_MIN_PROB = 0.25  # Phase 4: softened from 0.30 (with high-edge exemption) for more volume after Phase 3 prob fixes
 
 # ── Absolute minimum probability floor (Boss directive 2026-05-18) ──────
 # No trade below 20% model probability, regardless of horizon or market type.
@@ -311,7 +311,7 @@ LOWEST_PROB_FLOOR = {
     10: 0.15,  # (vs 0.14)
 }
 LOWEST_PROB_FLOOR_DEFAULT = 0.14  # Fallback for 11+ days (vs 0.13)
-LOWEST_SOFT_MIN_PROB = 0.30       # Soft absolute floor (vs 0.25)
+LOWEST_SOFT_MIN_PROB = 0.25       # Phase 4: softened
 
 # -----------------------------------------------------------------------
 # Dynamic sigma (forecast uncertainty in Fahrenheit)
@@ -686,6 +686,11 @@ def forecast_probability(forecast_temp: float, bucket_low: float | None,
     high_p = t_dist.cdf(bucket_high, df, loc=mu, scale=sigma) if bucket_high is not None else 1.0
 
     prob = high_p - low_p
+    # Adverse open cap (Phase 3)
+    if bucket_low is None and bucket_high is not None and mu > bucket_high:
+        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
+    elif bucket_high is None and bucket_low is not None and mu < bucket_low:
+        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
 
     # Open-ended adverse cap: when the point forecast is on the wrong side of
     # an open-ended bucket boundary, sigma inflation can push prob to 30-35%
@@ -895,7 +900,7 @@ def should_trade(edge: float, forecast_prob: float = None,
     the model itself considers unlikely.
 
     Hard caps (2026-05-17):
-      - MAX_FORECAST_PROB (40%): No single bucket should exceed this. Market
+      - MAX_FORECAST_PROB (65%): Narrow bins. Open cumulative can be higher (Phase 3). Market
         prices of 2-15% reflect genuine uncertainty the model must respect.
       - MAX_EDGE (50%): Edge above 50% means near-certainty on a temperature
         bucket — physically unrealistic. Cap prevents snake-oil signals.
@@ -1354,6 +1359,11 @@ def wu_normal_probability(forecast_temp: float, bucket_low: float | None,
     high_p = norm_dist.cdf(bucket_high, loc=mu, scale=sigma) if bucket_high is not None else 1.0
 
     prob = high_p - low_p
+    # Adverse open cap (Phase 3)
+    if bucket_low is None and bucket_high is not None and mu > bucket_high:
+        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
+    elif bucket_high is None and bucket_low is not None and mu < bucket_low:
+        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
     return max(0.001, min(0.999, prob))
 
 

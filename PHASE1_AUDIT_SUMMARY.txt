@@ -1,0 +1,52 @@
+PHASE 1 + 2 AUDIT COMPLETE - 2026-06-27
+
+=== TRADE VOLUME ===
+trade_log.csv: 14 entries
+positions.db: 10 rows (9 resolved_lost, 1 resolved_won)
+scan_log TRADE: 10
+Net recorded PnL: +41.73
+
+=== ALL CURRENT TRADEs (from scan_log + positions) ===
+1. Paris 2026-06-26 lowest 24C or below - WON +50.73 (fc 18, actual 18)
+2. Munich 2026-06-26 highest 31C or below - LOST -1
+3. Amsterdam 2026-06-26 highest 33C or below - LOST -1
+4. London 2026-06-26 highest 32C or below - LOST -1
+5. London 2026-06-28 highest 32C or higher - LOST -1
+6. Chicago 2026-06-28 highest 75F or below - LOST -1 (WATCH_ONLY_LEAK)
+7. Austin 2026-06-27 highest 91F or below - LOST -1
+8. Denver 2026-06-27 highest 83F or below - LOST -1 (WATCH_ONLY_LEAK)
+9. Helsinki 2026-06-27 highest 20C or below - LOST -1 (WATCH_ONLY_LEAK)
+10. Munich 2026-06-27 highest 32C or below - LOST -1
+
+Old Jun13 in trade_log (not in positions): Chicago, Denver, Chengdu, Milan.
+
+=== KEY FINDINGS (Phase 1) ===
+- 9/10 lost full stake.
+- Pattern: cheap buys on "or below" when forecast cool, but days hotter (WU error).
+- All used prob=0.65 cap + high edge from low mkt price.
+- 3 watch-only leaks (Chicago, Denver, Helsinki).
+- 6+ WU_FALSE_EDGE (cap created phantom edge).
+- Filters now so tight almost no new trades.
+- sniperweatherbot: inactive on trades.
+- Backup: no extra data.
+
+=== PHASE 2 FIX ===
+daily_trade_review.py: Removed "resolution_verdict" from SELECT.
+Now runs and produces:
+  10 resolved | WR 1/10 | PnL +41.73
+  Losses classified as WU_FALSE_EDGE and WATCH_ONLY_LEAK.
+  Flags raised correctly.
+
+Tested with --dry-run.
+
+=== Phase 3 Results ===
+- Blanket WU 0.65 cap removed from bot.py
+- MAX_FORECAST_PROB raised to 0.95
+- Adverse cap added to wu_normal
+- Demos:
+  Denver <=83 fc57: 99.3%
+  Paris <=24 fc18: 93.9%
+  London >=32 fc36: 68.8%
+  (Previously all forced to 0.65)
+
+This fixes the root cause of "prob=0.65" on all trades and artificial large edges vs cheap books.

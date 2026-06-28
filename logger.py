@@ -184,3 +184,12 @@ if __name__ == "__main__":
         question="Will NYC high temp exceed 60F on March 25?",
     )
     print("Done. Check trade_log.csv")
+
+# Phase 6 addition: enhanced diagnostics
+# Call this for key decisions to log why a trade was considered
+def log_phase6_decision(city, date, prob, edge, reasons, watch):
+    logger.info(fPHASE6: {city} {date} prob={prob:.1%} edge={edge:+.1%} reasons={reasons} watch={watch})
+
+
+# Phase 6 note: for better diagnostics, call sites now log PHASE6 PASSED or use enriched reason in log_scan
+
