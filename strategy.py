@@ -686,11 +686,6 @@ def forecast_probability(forecast_temp: float, bucket_low: float | None,
     high_p = t_dist.cdf(bucket_high, df, loc=mu, scale=sigma) if bucket_high is not None else 1.0
 
     prob = high_p - low_p
-    # Adverse open cap (Phase 3)
-    if bucket_low is None and bucket_high is not None and mu > bucket_high:
-        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
-    elif bucket_high is None and bucket_low is not None and mu < bucket_low:
-        prob = min(prob, OPEN_ENDED_ADVERSE_PROB_CAP)
 
     # Open-ended adverse cap: when the point forecast is on the wrong side of
     # an open-ended bucket boundary, sigma inflation can push prob to 30-35%

@@ -35,9 +35,28 @@ BUILDER_CODE = os.getenv("POLYMARKET_BUILDER_CODE", BYTES32_ZERO)
 
 # -----------------------------------------------------------------------
 # SAFETY FLAG - Controlled via .env: DRY_RUN=true to simulate, DRY_RUN=false for live.
+#
+# LIVE TRADING LOCKOUT (2026-07-02, post-audit directive):
+#   1. DRY_RUN now DEFAULTS TO TRUE. Live requires an explicit DRY_RUN=false.
+#   2. Even with DRY_RUN=false, live trading requires a fresh, passing
+#      validation certificate issued by validation_gate.py (make-or-break
+#      paper-trading evaluation: n>=100 resolved, model beats market Brier,
+#      bootstrap-positive P&L, drawdown cap). Without it, DRY_RUN is forced
+#      back on. No more live trades until the logic is proven sound.
 # -----------------------------------------------------------------------
-# LIVE TRADING ENABLED 2026-06-01 — Boss directive
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+
+if not DRY_RUN:
+    try:
+        from validation_gate import live_trading_authorized
+        _live_ok, _live_reason = live_trading_authorized()
+    except Exception as _gate_err:  # missing/broken gate module locks live trading
+        _live_ok, _live_reason = False, f"validation gate unavailable: {_gate_err}"
+    if _live_ok:
+        logger.warning(f"LIVE TRADING ENABLED — {_live_reason}")
+    else:
+        logger.warning(f"LIVE TRADING LOCKED ({_live_reason}) — forcing DRY_RUN")
+        DRY_RUN = True
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ import logging
 import os
 import signal
 import uuid
+import json
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -82,11 +83,20 @@ from strategy import (
     LOWEST_SOFT_MIN_PROB,
     UNRESOLVED_EXPOSURE_CAP,
 )
+# NOTE: get_current_bankroll deliberately NOT imported — bot.py defines its
+# own below; importing it too silently shadowed one with the other.
 from risk_manager_v2 import (
-    get_current_bankroll,
     get_safe_position_size,
     check_drawdown,
     print_risk_status,
+)
+from trade_gates import (
+    check_cross_source_agreement,
+    check_same_day_observed,
+    check_model_market_divergence,
+    check_hours_to_resolution,
+    DailySpendTracker,
+    DAILY_SPEND_FRACTION,
 )
 from logger import log_trade, log_scan
 from notifier import TelegramNotifier
@@ -361,6 +371,11 @@ MIN_PRICE_FLOOR = 0.01
 _traded_tokens: set = set()
 _traded_tokens_date: str = ""
 
+# Daily spend cap tracked across cycles (rolls over at UTC midnight).
+# The old implementation reset its counter every scan cycle, so the
+# "daily" cap was really a per-15-minute cap — up to 96x per day.
+_daily_spend = DailySpendTracker()
+
 
 def _reset_position_tracker() -> None:
     """Clears the traded token set at midnight and resets daily Telegram stats."""
@@ -410,7 +425,6 @@ def run_cycle() -> None:
     trades_placed = 0
     total_spent = 0.0
     cycle_bankroll = get_current_bankroll()
-    MAX_DAILY_SPEND = cycle_bankroll * 0.5
 
     # Phase 0: Pre-fetch METAR observations for Bayesian same-day updates
     raw_metar: dict = {}      # Initialised before try so bias block can always reference it
@@ -515,6 +529,19 @@ def run_cycle() -> None:
             logger.info(f"SKIP (already traded): {slug}")
             log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP", "already_traded", bucket_low=bucket_low, bucket_high=bucket_high)
             notifier.record_trade(entered=False)
+            continue
+
+        # ── Resolution proximity gate ────────────────────────────────────
+        # MIN_HOURS_TO_RES existed in strategy.py since v1 but was never
+        # enforced anywhere. Skip markets whose local day ends in <2h.
+        _city_tz = CITIES.get(city, {}).get("tz")
+        _res_ok, _res_reason = check_hours_to_resolution(
+            date_str, _city_tz, min_hours=MIN_HOURS_TO_RES)
+        if not _res_ok:
+            logger.info(f"SKIP (resolution proximity): {slug} | {_res_reason}")
+            log_scan(slug, city, date_str, 0.0, 0.0, 0.0, "SKIP",
+                     f"too_close_to_resolution: {_res_reason}",
+                     bucket_low=bucket_low, bucket_high=bucket_high)
             continue
 
         # ── Wunderground Check (resolution source — primary signal) ──
@@ -626,6 +653,55 @@ def run_cycle() -> None:
             logger.info(f"WU TRADE: {city} {date_str} | {wu_reason}")
         else:
             logger.debug(f"WU P2 candidate: {city} {date_str} [{bucket_low}-{bucket_high}]{unit} (wu={wu_temp_c:.1f}C)")
+
+        # ── Phase 10 sanity gates (WU path) ──────────────────────────────
+        # Root-cause defense from the 2026-06 audit: the losers all traded
+        # on WU inputs that independent models contradicted (Denver 57°F
+        # forecast high in late June, etc). Two gates, both fail-safe:
+        #   1. Cross-source: Open-Meteo must agree with WU within 4°C for
+        #      this city/date. No second source = no trade.
+        #   2. Same-day stale-forecast: for same-day highest markets the
+        #      current METAR reading must not already exceed the WU max.
+        fc_key = (city, market_type)
+        if fc_key not in forecast_cache:
+            try:
+                if market_type == "lowest":
+                    forecast_cache[fc_key] = get_forecast_low(city, days=FORECAST_DAYS)
+                else:
+                    forecast_cache[fc_key] = get_forecast(city, days=FORECAST_DAYS)
+                time.sleep(1.0)  # Open-Meteo rate-limit spacing
+            except Exception as e:
+                logger.warning(f"Cross-check forecast fetch failed for {city}: {e}")
+                forecast_cache[fc_key] = None
+        _om_data = forecast_cache.get(fc_key)
+        _om_temp_c = _om_data.get(date_str) if _om_data else None
+
+        _cs_ok, _cs_reason = check_cross_source_agreement(wu_temp_c, _om_temp_c)
+        if not _cs_ok:
+            logger.info(f"SKIP (sanity/cross-source): {slug} | {_cs_reason}")
+            log_scan(slug, city, date_str, prob, 0.0, 0.0, "SKIP",
+                     f"SANITY_CROSS_SOURCE: {_cs_reason}",
+                     forecast_temp=forecast_in_unit, market_unit=unit,
+                     bucket_low=bucket_low, bucket_high=bucket_high)
+            notifier.record_trade(entered=False)
+            continue
+
+        if market_type != "lowest" and city in metar_cache:
+            try:
+                _local_today = datetime.now(ZoneInfo(CITIES[city]["tz"])).strftime("%Y-%m-%d")
+            except Exception:
+                _local_today = None
+            if date_str == _local_today:
+                _observed_c = metar_cache[city].get("temp_c")
+                _ob_ok, _ob_reason = check_same_day_observed(wu_temp_c, _observed_c)
+                if not _ob_ok:
+                    logger.info(f"SKIP (sanity/observed): {slug} | {_ob_reason}")
+                    log_scan(slug, city, date_str, prob, 0.0, 0.0, "SKIP",
+                             f"SANITY_OBSERVED: {_ob_reason}",
+                             forecast_temp=forecast_in_unit, market_unit=unit,
+                             bucket_low=bucket_low, bucket_high=bucket_high)
+                    notifier.record_trade(entered=False)
+                    continue
 
         # Get weather forecast (cached per (city, market_type) per cycle).
         # Highest-temp markets use daily MAX; lowest-temp markets use daily MIN.
@@ -830,9 +906,13 @@ def run_cycle() -> None:
         if yes_token_id in price_cache:
             market_price = price_cache[yes_token_id]
         else:
-            # Always fetch live order book asks
+            # Always fetch live order book asks.
+            # Qualifying band uses the lead-time graduated threshold, not the
+            # flat default (the flat 0.15 let 4-day-out markets sweep at the
+            # same-day bar).
             book_asks = get_book_asks(yes_token_id, client=clob_client)
-            qualifying_asks = [(p, s) for p, s in book_asks if p < prob - ENTRY_THRESHOLD]
+            _entry_thr = get_entry_threshold(date_str)
+            qualifying_asks = [(p, s) for p, s in book_asks if p < prob - _entry_thr]
             available_usdc = float("inf")  # default; overridden below if book depth is known
             real_market_ask = float(book_asks[0][0]) if book_asks else None  # lowest real ask, or None if no sellers
 
@@ -880,8 +960,28 @@ def run_cycle() -> None:
 
             edge = find_edge(prob, effective_price)
 
+            # ── SANITY_DIVERGENCE gate ────────────────────────────────────
+            # A 35+ point model-vs-market gap is a data-error signal, not an
+            # edge. Every one of the 10 audited June trades had a gap >=0.60
+            # (prob capped at 0.65 vs asks of $0.001-0.034) and 9/10 lost.
+            _div_ok, _div_reason = check_model_market_divergence(prob, effective_price)
+            if not _div_ok:
+                logger.info(f"SKIP (sanity/divergence): {slug} | {_div_reason}")
+                log_scan(slug, city, date_str, prob, effective_price, edge, "SKIP",
+                         f"SANITY_DIVERGENCE: {_div_reason}",
+                         market_ask=real_market_ask, max_bid=effective_price,
+                         forecast_temp=forecast_in_unit, market_unit=unit,
+                         bucket_low=bucket_low, bucket_high=bucket_high)
+                notifier.record_trade(entered=False)
+                continue
+
+            # Strategy gates now apply to ALL signals. The old
+            # `if not use_wunderground` bypass exempted WU trades — i.e.
+            # essentially every trade — from the entry threshold, probability
+            # floors, MAX_EDGE and lead-time caps. That bypass is the reason
+            # the June longshots executed at all.
             skip_reason = classify_skip_reason(edge, forecast_prob=prob, market_date=date_str, market_type=market_type)
-            if not use_wunderground and skip_reason is not None:
+            if skip_reason is not None:
                 log_scan(slug, city, date_str, prob, effective_price, edge, "PASS", skip_reason, market_ask=real_market_ask, max_bid=effective_price, forecast_temp=forecast_in_unit, market_unit=unit, bucket_low=bucket_low, bucket_high=bucket_high)
                 notifier.record_trade(entered=False)
                 continue
@@ -913,7 +1013,7 @@ def run_cycle() -> None:
             edge = find_edge(prob, effective_price)
 
             skip_reason = classify_skip_reason(edge, forecast_prob=prob, market_date=date_str, market_type=market_type)
-            if not use_wunderground and skip_reason is not None:
+            if skip_reason is not None:
                 log_scan(slug, city, date_str, prob, effective_price, edge, "PASS", skip_reason, market_ask=real_market_ask, max_bid=effective_price, forecast_temp=forecast_in_unit, market_unit=unit, bucket_low=bucket_low, bucket_high=bucket_high)
                 notifier.record_trade(entered=False)
                 continue
@@ -962,6 +1062,11 @@ def run_cycle() -> None:
                 "market_type": market_type,
                 "wu_source": use_wunderground,  # True if WU-powered signal
                 "is_lottery": False,  # Lottery cities removed — HK/Seoul now in WATCH_ONLY_CITIES
+                # WATCH_ONLY_LEAK fix (audit 2026-06-27): this key was only set
+                # on liquid-path signals, so every FOK-sweep signal slipped past
+                # the `s.get("is_watch_only")` filter — Chicago, Denver and
+                # Helsinki all traded (and lost) from the watch list.
+                "is_watch_only": _city_watch_only,
             })
             continue
 
@@ -991,8 +1096,19 @@ def run_cycle() -> None:
             f"mkt={market_price:.1%} | edge={edge:+.1%}"
         )
 
+        # ── SANITY_DIVERGENCE gate (liquid path) ─────────────────────────
+        _div_ok, _div_reason = check_model_market_divergence(prob, market_price)
+        if not _div_ok:
+            logger.info(f"SKIP (sanity/divergence): {slug} | {_div_reason}")
+            log_scan(slug, city, date_str, prob, market_price, edge, "SKIP",
+                     f"SANITY_DIVERGENCE: {_div_reason}",
+                     forecast_temp=forecast_in_unit, market_unit=unit,
+                     bucket_low=bucket_low, bucket_high=bucket_high)
+            notifier.record_trade(entered=False)
+            continue
+
         skip_reason = classify_skip_reason(edge, forecast_prob=prob, market_date=date_str, market_type=market_type)
-        if not use_wunderground and skip_reason is not None:
+        if skip_reason is not None:
             log_scan(slug, city, date_str, prob, market_price, edge, "PASS", skip_reason, forecast_temp=forecast_in_unit, market_unit=unit, bucket_low=bucket_low, bucket_high=bucket_high)
             notifier.record_trade(entered=False)
             continue
@@ -1227,10 +1343,27 @@ def run_cycle() -> None:
 
     # Phase 3: Execute orders
     for sig in filtered:
-        if total_spent + sig["size"] > MAX_DAILY_SPEND:
+        # Belt-and-braces watch-only guard at the point of execution.
+        # List-level filtering already ran, but the June audit proved a
+        # single missing dict key defeats it. Re-derive from the city name.
+        if (sig.get("is_watch_only") or is_city_watch_only(sig["city"])
+                or not is_city_tradable(sig["city"])):
+            logger.info(f"EXECUTION GUARD (watch-only/blocked): {sig['slug']}")
+            log_scan(sig["slug"], sig["city"], sig["date_str"], sig["prob"],
+                     sig.get("market_price", 0), sig.get("edge", 0),
+                     "SKIP", "watch_only_execution_guard",
+                     market_ask=sig.get("market_ask"), max_bid=sig.get("max_bid"),
+                     forecast_temp=sig.get("forecast_in_unit"),
+                     market_unit=sig.get("unit", ""),
+                     bucket_low=sig["bucket_low"], bucket_high=sig["bucket_high"])
+            continue
+
+        # Daily spend cap: 20% of bankroll per UTC day, tracked ACROSS cycles
+        # (README contract; previously 50% per cycle, i.e. no daily cap at all).
+        if not _daily_spend.allows(sig["size"], cycle_bankroll):
             logger.warning(
-                f"Daily spend limit reached (${total_spent:.2f} + ${sig['size']:.2f} "
-                f"> ${MAX_DAILY_SPEND:.2f}). Stopping."
+                f"Daily spend limit reached (${_daily_spend.spent_today():.2f} deployed today "
+                f"+ ${sig['size']:.2f} > {DAILY_SPEND_FRACTION:.0%} of ${cycle_bankroll:.2f}). Stopping."
             )
             log_scan(sig["slug"], sig["city"], sig["date_str"], sig["prob"],
                      sig["market_price"], sig["edge"], "SKIP", "daily_spend_limit", market_ask=sig.get("market_ask"), max_bid=sig.get("max_bid"), forecast_temp=sig.get("forecast_in_unit"), market_unit=sig.get("unit",""), bucket_low=sig["bucket_low"], bucket_high=sig["bucket_high"])
@@ -1466,6 +1599,7 @@ def run_cycle() -> None:
 
             trades_placed += 1
             total_spent += actual_spent
+            _daily_spend.record(actual_spent)
             continue
 
         # ---- Normal (liquid) market path ----
@@ -1585,6 +1719,7 @@ def run_cycle() -> None:
 
         trades_placed += 1
         total_spent += actual_size
+        _daily_spend.record(actual_size)
 
     elapsed = (datetime.now() - cycle_start).total_seconds()
     logger.info(
