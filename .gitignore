@@ -1,4 +1,8 @@
 .env
+# Live-trading unlock token — machine-generated per environment by
+# validation_gate.py. Must NEVER be committed: a checked-in certificate would
+# smuggle an "authorized" state into the repo and defeat the lockout.
+validation_certificate.json
 *.log
 trade_log.csv
 scan_log.csv

@@ -14,6 +14,7 @@ without spelunking through chat history.
 | `logrotate-weatherbot` | `/etc/logrotate.d/weatherbot` | Daily log rotation (uses `copytruncate` — DOES NOT signal the process) |
 | `watchdog.sh` | `/root/watchdog.sh` | 5-min cron check that restarts the bot if down and sends Telegram alert |
 | `validation_weekly_check.sh` | runs in place from `ops/` | Weekly Stage B monitor: lock status + resolved-paper-trade progress; runs the full evaluation once n≥100 |
+| `redeploy.sh` | runs in place from `ops/` | Redeploy the bot dir from git master, preserving `.env`/`positions.db`/venv; installs the service unit + weekly cron |
 
 > **Canonical bot dir: `/root/weatherbot`.** Verified 2026-07-03 as the path
 > the live `weatherbot.service` runs from, where the fixed post-PR#7 code
