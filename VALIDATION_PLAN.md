@@ -49,11 +49,21 @@ If Stage A fails, the code is broken. Do not proceed to Stage B.
 Run the bot in DRY_RUN for as long as it takes to accumulate **100 resolved
 paper predictions** (at current filter tightness expect 4–8+ weeks; that is
 itself information — a strategy that cannot generate 100 samples cannot be
-validated or pay for itself). Then:
+validated or pay for itself).
+
+**Data hygiene (critical):** `positions.db` has no paper/live flag, and on a
+deployed box it still contains the pre-fix June live trades — 9 losses and
+the +$50.73 Paris lottery win produced by the *old broken code*. Those rows
+must not count toward validating the *new* code. Either start Stage B on a
+fresh DB (archive the old one), or always pass the Stage B deployment
+timestamp as a cutoff:
 
 ```bash
-python3 validation_gate.py --evaluate positions.db
+python3 validation_gate.py --evaluate positions.db --since 2026-07-02
 ```
+
+The evaluation records the window in the certificate (`window_since`) so a
+reviewer can verify no pre-fix trades leaked into the sample.
 
 All four criteria must pass:
 

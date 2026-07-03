@@ -394,22 +394,41 @@ class TestCertificateLifecycle:
 
 
 class TestPositionsDbLoader:
-    def test_loads_only_resolved_rows(self, tmp_path):
+    @staticmethod
+    def _make_db(tmp_path):
         import sqlite3
         db = str(tmp_path / "positions.db")
         conn = sqlite3.connect(db)
         conn.execute("""CREATE TABLE positions (
-            forecast_prob REAL, market_prob REAL, pnl_usdc REAL, status TEXT)""")
+            forecast_prob REAL, market_prob REAL, pnl_usdc REAL,
+            status TEXT, entry_time TEXT)""")
         rows = [
-            (0.65, 0.0193, 50.73, "resolved_won"),
-            (0.65, 0.0010, -1.0, "resolved_lost"),
-            (0.55, 0.30, None, "open"),          # unresolved — excluded
-            (None, 0.30, -1.0, "resolved_lost"),  # missing prob — excluded
+            # Pre-fix LIVE trades (June) — the broken-era record
+            (0.65, 0.0193, 50.73, "resolved_won",  "2026-06-26T14:07:58"),
+            (0.65, 0.0010, -1.0,  "resolved_lost", "2026-06-27T22:40:12"),
+            # Stage B paper trades (post-deployment)
+            (0.45, 0.30,   0.50,  "resolved_won",  "2026-07-03T10:00:00"),
+            (0.40, 0.28,  -1.0,   "resolved_lost", "2026-07-04T10:00:00"),
+            # Excluded regardless of window
+            (0.55, 0.30,  None,   "open",          "2026-07-05T10:00:00"),
+            (None, 0.30,  -1.0,   "resolved_lost", "2026-07-05T11:00:00"),
         ]
-        conn.executemany("INSERT INTO positions VALUES (?,?,?,?)", rows)
+        conn.executemany("INSERT INTO positions VALUES (?,?,?,?,?)", rows)
         conn.commit()
         conn.close()
+        return db
 
-        records = vg.records_from_positions_db(db)
-        assert len(records) == 2
+    def test_loads_only_resolved_rows(self, tmp_path):
+        records = vg.records_from_positions_db(self._make_db(tmp_path))
+        assert len(records) == 4
         assert records[0]["won"] is True and records[1]["won"] is False
+
+    def test_since_cutoff_excludes_prefix_live_trades(self, tmp_path):
+        """Stage B integrity: positions.db has no paper/live flag, so the
+        pre-fix June live trades (incl. the +50.73 Paris outlier) must be
+        excludable by entry_time. Without this, the lottery win produced by
+        the OLD broken code could help 'validate' the NEW code."""
+        db = self._make_db(tmp_path)
+        records = vg.records_from_positions_db(db, since="2026-07-02")
+        assert len(records) == 2
+        assert all(r["pnl"] != 50.73 for r in records), "Paris live win must be excluded"

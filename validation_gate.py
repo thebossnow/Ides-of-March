@@ -145,16 +145,23 @@ def evaluate_paper_record(records: list[dict],
     }
 
 
-def records_from_positions_db(db_path: str) -> list[dict]:
+def records_from_positions_db(db_path: str, since: str | None = None) -> list[dict]:
     """Load resolved positions as evaluation records.
 
     Uses forecast_prob (model), market_prob (entry price = market implied
     probability), pnl_usdc, and win/loss status.
+
+    since: ISO date/datetime string. Only positions entered at or after
+    this moment are counted. REQUIRED IN PRACTICE for Stage B: positions.db
+    has no paper/live flag, so without a cutoff the evaluation would mix in
+    the pre-fix live trades (the 9 losses + Paris lottery win produced by
+    the very code the fixes removed), corrupting the record the campaign is
+    supposed to prove. Set --since to the Stage B deployment timestamp, or
+    start the campaign on a fresh DB.
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
+    query = """
         SELECT forecast_prob, market_prob, pnl_usdc, status
         FROM positions
         WHERE status IN ('resolved_won', 'resolved_lost')
@@ -162,7 +169,11 @@ def records_from_positions_db(db_path: str) -> list[dict]:
           AND market_prob IS NOT NULL
           AND pnl_usdc IS NOT NULL
         """
-    ).fetchall()
+    params: tuple = ()
+    if since:
+        query += " AND entry_time >= ?"
+        params = (since,)
+    rows = conn.execute(query, params).fetchall()
     conn.close()
     return [
         {
@@ -240,6 +251,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Evaluate the resolved paper record; issue certificate on pass")
     parser.add_argument("--bankroll", type=float, default=DEFAULT_PAPER_BANKROLL,
                         help="Paper bankroll for the drawdown criterion")
+    parser.add_argument("--since", metavar="ISO_TIMESTAMP", default=None,
+                        help="Only count positions entered at/after this moment "
+                             "(e.g. 2026-07-02). Use the Stage B deployment time "
+                             "to exclude pre-fix live trades from the evaluation.")
     args = parser.parse_args(argv)
 
     if args.check:
@@ -248,8 +263,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if ok else 1
 
     if args.evaluate:
-        records = records_from_positions_db(args.evaluate)
+        if not args.since:
+            print("WARNING: no --since cutoff given. positions.db has no paper/live "
+                  "flag, so pre-fix LIVE trades will be counted if present. Pass "
+                  "--since <Stage B deployment timestamp> or evaluate a fresh DB.")
+        records = records_from_positions_db(args.evaluate, since=args.since)
         stats = evaluate_paper_record(records, paper_bankroll=args.bankroll)
+        stats["window_since"] = args.since
         print(json.dumps(stats, indent=2))
         if stats["passed"]:
             cert = issue_certificate(stats)
