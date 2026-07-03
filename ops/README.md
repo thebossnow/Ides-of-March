@@ -15,13 +15,14 @@ without spelunking through chat history.
 | `watchdog.sh` | `/root/watchdog.sh` | 5-min cron check that restarts the bot if down and sends Telegram alert |
 | `validation_weekly_check.sh` | runs in place from `ops/` | Weekly Stage B monitor: lock status + resolved-paper-trade progress; runs the full evaluation once n≥100 |
 
-> **Path note:** the table and commands below use `/root/weatherbot`, but the
-> committed `weatherbot.service` sets `WorkingDirectory=/root/Ides-of-March`.
-> Pick one canonical bot directory and make the service, cron, and deploy
-> match it — a split (code rsynced to one dir, service running from another)
-> means the running bot may not be the code you think it is. This matters
-> for Stage B: the paper campaign is only valid if the *fixed* code is what's
-> running.
+> **Canonical bot dir: `/root/weatherbot`.** Verified 2026-07-03 as the path
+> the live `weatherbot.service` runs from, where the fixed post-PR#7 code
+> lives, and where the Stage B `positions.db` accumulates. The service file,
+> README install steps, and cron all use it. A `git clone` produces an
+> `Ides-of-March/` directory, so deploy by cloning/rsyncing *into*
+> `/root/weatherbot` (not by using the clone's own name) — otherwise the
+> service launches a different (possibly stale) checkout than the one you
+> updated.
 
 ## Install on a fresh VPS
 

@@ -9,13 +9,18 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/Ides-of-March
+# Canonical bot dir is /root/weatherbot — verified 2026-07-03 as the path
+# the live service runs from and where the fixed post-PR#7 code + the Stage B
+# paper campaign's positions.db live. Matches the install steps in ops/README.md.
+# (A prior commit set this to /root/Ides-of-March, which diverged from reality
+# and would have launched a stale checkout on redeploy.)
+WorkingDirectory=/root/weatherbot
 # load_dotenv() in the import chain reads .env from WorkingDirectory
-ExecStart=/root/Ides-of-March/venv/bin/python3 /root/Ides-of-March/bot.py
+ExecStart=/root/weatherbot/venv/bin/python3 /root/weatherbot/bot.py
 Restart=always
 RestartSec=10
-StandardOutput=append:/root/Ides-of-March/bot.log
-StandardError=append:/root/Ides-of-March/bot.log
+StandardOutput=append:/root/weatherbot/bot.log
+StandardError=append:/root/weatherbot/bot.log
 # Single instance only — systemd tracks the main PID, no stray duplicates
 KillMode=control-group
 
