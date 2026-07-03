@@ -96,6 +96,65 @@ AIRPORT_COORDS: dict[str, tuple[float, float]] = {
 }
 
 
+def _build_forecast_days(data: dict) -> tuple[list[dict], str | None]:
+    """Parse a WU v3 forecast payload into forecast_days. Pure function.
+
+    Returns (days, error). error is None on success.
+
+    DATE ALIGNMENT FIX (2026-07-02): days are labeled from the API's own
+    validTimeLocal array (the STATION's local calendar dates), not from
+    date.today() on the server. The old synthesis from the server's UTC
+    date shifted every forecast by one day for any city whose local date
+    differed from UTC at fetch time (e.g. US cities scanned in the UTC
+    morning, Asia/Pacific cities scanned in the UTC evening). That
+    misalignment fed the wrong day's temperature into the model — the
+    direct cause of absurd inputs like a 57°F forecast high for Denver in
+    late June (audit 2026-06-27).
+    """
+    highs = data.get("calendarDayTemperatureMax", [])
+    lows  = data.get("calendarDayTemperatureMin", [])
+    narratives = data.get("narrative", [])
+    valid_times = data.get("validTimeLocal", [])
+
+    # ── Guard: validate response structure ──
+    if not highs or not lows:
+        return [], f"WU API returned empty temps: highs={len(highs)} lows={len(lows)}"
+
+    if len(highs) != len(lows):
+        return [], f"WU API mismatched arrays: highs={len(highs)} lows={len(lows)}"
+
+    if any(h is None for h in highs) or any(l is None for l in lows):
+        return [], "WU API returned None temperature values"
+
+    if not valid_times or len(valid_times) < len(highs):
+        # Fail safe: without station-local dates we cannot label days
+        # reliably; refusing beats trading on a misdated forecast.
+        return [], (
+            f"WU API missing validTimeLocal dates: got {len(valid_times)} "
+            f"for {len(highs)} days"
+        )
+
+    days = []
+    for i in range(len(highs)):
+        vt = valid_times[i]
+        if not vt or len(vt) < 10:
+            return [], f"WU API invalid validTimeLocal entry at index {i}: {vt!r}"
+        day_info = {
+            "date": vt[:10],  # station-local ISO date, e.g. "2026-07-02"
+            "high_c": highs[i],
+            "low_c": lows[i],
+            "narrative": narratives[i] if i < len(narratives) else "",
+        }
+        nar = narratives[i] if i < len(narratives) else ""
+        _parse_narrative_ranges(nar, day_info)
+        days.append(day_info)
+
+    if not days:
+        return [], "WU API: no valid forecast days after parsing"
+
+    return days, None
+
+
 def fetch_forecasts(cities: list[str]) -> dict[str, dict]:
     """Fetch 5-day Wunderground forecasts for given city names.
 
@@ -118,51 +177,9 @@ def fetch_forecasts(cities: list[str]) -> dict[str, dict]:
             with urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
 
-            highs = data.get("calendarDayTemperatureMax", [])
-            lows  = data.get("calendarDayTemperatureMin", [])
-            narratives = data.get("narrative", [])
-
-            # ── Guard: validate response structure ──
-            if not highs or not lows:
-                results[city] = {
-                    "city": city,
-                    "error": f"WU API returned empty temps: highs={len(highs)} lows={len(lows)}",
-                }
-                continue
-
-            if len(highs) != len(lows):
-                results[city] = {
-                    "city": city,
-                    "error": f"WU API mismatched arrays: highs={len(highs)} lows={len(lows)}",
-                }
-                continue
-
-            if any(h is None for h in highs) or any(l is None for l in lows):
-                results[city] = {
-                    "city": city,
-                    "error": "WU API returned None temperature values",
-                }
-                continue
-
-            days = []
-            today = date.today()
-            for i in range(len(highs)):
-                day_info = {
-                    "date": str(today + timedelta(days=i)),
-                    "high_c": highs[i],
-                    "low_c": lows[i],
-                    "narrative": narratives[i] if i < len(narratives) else "",
-                }
-                nar = narratives[i] if i < len(narratives) else ""
-                _parse_narrative_ranges(nar, day_info)
-                days.append(day_info)
-
-            # ── Guard: ensure we got at least 1 valid day ──
-            if not days:
-                results[city] = {
-                    "city": city,
-                    "error": "WU API: no valid forecast days after parsing",
-                }
+            days, parse_error = _build_forecast_days(data)
+            if parse_error:
+                results[city] = {"city": city, "error": parse_error}
                 continue
 
             results[city] = {

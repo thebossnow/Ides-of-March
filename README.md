@@ -140,9 +140,11 @@ These are set as constants in `strategy.py` and `bot.py`:
 
 See [DEVELOPER_GUIDE_v2.md](DEVELOPER_GUIDE_v2.md) for full technical documentation including module details, data flow, algorithms, API reference, error handling, and glossary.
 
-## DRY_RUN Mode
+## DRY_RUN Mode and the Live-Trading Lockout
 
-The bot starts in paper trading mode by default (`DRY_RUN = True` in `executor.py`). In this mode the full pipeline runs (market discovery, forecasts, probability calculation, edge detection, position sizing) but no real orders are placed. Set `DRY_RUN = False` in `executor.py` to enable live trading.
+The bot starts in paper trading mode by default (`DRY_RUN` env var, default `true`). In this mode the full pipeline runs (market discovery, forecasts, probability calculation, edge detection, position sizing) but no real orders are placed.
+
+**Live trading is locked.** Setting `DRY_RUN=false` is necessary but not sufficient: `executor.py` also requires a fresh, passing validation certificate issued by `validation_gate.py` (a make-or-break paper-trading evaluation — 100+ resolved predictions, model calibration better than the market's, bootstrap-positive P&L, bounded drawdown). Without it, the bot forces itself back into DRY_RUN. See [VALIDATION_PLAN.md](VALIDATION_PLAN.md).
 
 ---
 

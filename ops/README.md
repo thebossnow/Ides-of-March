@@ -13,6 +13,16 @@ without spelunking through chat history.
 | `weatherbot.service` | `/etc/systemd/system/weatherbot.service` | Systemd unit for the bot |
 | `logrotate-weatherbot` | `/etc/logrotate.d/weatherbot` | Daily log rotation (uses `copytruncate` — DOES NOT signal the process) |
 | `watchdog.sh` | `/root/watchdog.sh` | 5-min cron check that restarts the bot if down and sends Telegram alert |
+| `validation_weekly_check.sh` | runs in place from `ops/` | Weekly Stage B monitor: lock status + resolved-paper-trade progress; runs the full evaluation once n≥100 |
+
+> **Canonical bot dir: `/root/weatherbot`.** Verified 2026-07-03 as the path
+> the live `weatherbot.service` runs from, where the fixed post-PR#7 code
+> lives, and where the Stage B `positions.db` accumulates. The service file,
+> README install steps, and cron all use it. A `git clone` produces an
+> `Ides-of-March/` directory, so deploy by cloning/rsyncing *into*
+> `/root/weatherbot` (not by using the clone's own name) — otherwise the
+> service launches a different (possibly stale) checkout than the one you
+> updated.
 
 ## Install on a fresh VPS
 
@@ -37,6 +47,32 @@ cat >> /tmp/cron <<'EOF'
 0  3 * * *  /root/weatherbot/backup.sh
 EOF
 sudo crontab /tmp/cron && rm /tmp/cron
+```
+
+## Stage B validation monitor
+
+`validation_weekly_check.sh` is a **read-only** monitor for the paper
+campaign (see `VALIDATION_PLAN.md`). It never unlocks live trading — the
+`executor.py` certificate check remains the sole gate. It reports the lock
+status, counts resolved paper trades entered on/after the Stage B cutoff
+(`SINCE`, default `2026-07-02`, so the pre-fix June live trades are
+excluded), and once the count reaches `TARGET_N` (default 100) runs the
+full make-or-break evaluation and reports pass/fail.
+
+```bash
+# Weekly cron (Sundays 05:00 UTC). Uses the repo copy in place.
+sudo crontab -l > /tmp/cron
+echo '0 5 * * 0 /root/weatherbot/ops/validation_weekly_check.sh >> /var/log/validation_check.log 2>&1' >> /tmp/cron
+sudo crontab /tmp/cron && rm /tmp/cron
+
+# Manual run
+BOT_DIR=/root/weatherbot ops/validation_weekly_check.sh
+```
+
+When the campaign is ready to be scored manually:
+
+```bash
+python3 validation_gate.py --evaluate positions.db --since 2026-07-02
 ```
 
 ## Why the SIGHUP postrotate was removed (2026-06-11)
