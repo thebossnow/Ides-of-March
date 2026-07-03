@@ -14,7 +14,7 @@
 # the certificate. The executor lockout remains the sole gate to live trading.
 #
 # Cron (Sundays 05:00 UTC):
-#   0 5 * * 0 /root/Ides-of-March/ops/validation_weekly_check.sh >> /var/log/validation_check.log 2>&1
+#   0 5 * * 0 /root/weatherbot/ops/validation_weekly_check.sh >> /var/log/validation_check.log 2>&1
 #
 # Config via env (all optional):
 #   BOT_DIR             bot directory (default: parent of this script)
