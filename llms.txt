@@ -1,0 +1,14 @@
+# Ides-of-March — Polymarket Weather Trading Bot
+
+> Automated trading bot for Polymarket temperature prediction markets. Student's t-distribution probability model, fractional Kelly sizing, 51 cities.
+
+## Documentation
+- [Developer_Guide_V2.md](Developer_Guide_V2.md): **Project Name:** Polymarket Weather Bot
+- [PHASE4_FILTER_TUNING.md](PHASE4_FILTER_TUNING.md): - SOFT_MIN_PROB = 0.30 too high → almost no trades pass Phase 2 best-bucket.
+- [PHASE5_CALIBRATION.md](PHASE5_CALIBRATION.md): Created calibrate.py (skeleton that loads resolved + wu, computes stats, suggests sigmas).
+- [PHASE6_DIAGNOSTICS_PAPER.md](PHASE6_DIAGNOSTICS_PAPER.md): - Better "why this trade" visibility in logs.
+- [PHASE7_SNIPER_DECISION.md](PHASE7_SNIPER_DECISION.md): - sniperweatherbot/ is a parallel, high-speed implementation using:
+- [README.md](README.md): An automated trading bot that identifies pricing inefficiencies in Polymarket's temperature prediction markets. It compa
+- [TRADE_HISTORY.md](TRADE_HISTORY.md): **Generated:** 2026-06-27T23:15:05Z
+- [TRADE_HISTORY_AUDIT.md](TRADE_HISTORY_AUDIT.md): **Audit date:** 2026-06-27
+- [bot-py-handoff-CORRECTED.md](bot-py-handoff-CORRECTED.md): **Corrects:** `bot-py-handoff.md` (Hermes/Raijin, 2026-06-20)

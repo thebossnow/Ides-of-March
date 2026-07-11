@@ -15,4 +15,16 @@ calibration_history/
 backups/
 *.bak.*
 *.bak
+*.bak_*
 logs/calibration_weekly_*.log
+
+# Rotated logs, local archives, tool caches (added 2026-07-11)
+*.log.*
+scan_log.csv.*
+archive/
+.hermes/
+graphify-out/
+*.db-shm
+*.db-wal
+weather_cache.json
+reports/
